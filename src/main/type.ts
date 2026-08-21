@@ -107,6 +107,8 @@ export interface DuelDataFile {
   Duel: DuelData;
 }
 
+export type UnlockSecret = string | number | number[];
+
 export interface GateData {
   gate: {
     [gateId in string]: {
@@ -127,7 +129,7 @@ export interface GateData {
         begin_sn: string; // ''
         npc_id: number; // 0 for unlock & reward / above 0 for duels
         difficulty?: number;
-        unlock_secret?: number | number[];
+        unlock_secret?: UnlockSecret;
       };
     };
   };

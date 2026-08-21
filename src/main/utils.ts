@@ -3,6 +3,8 @@ import { parse } from 'jsonc-parser';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 
+declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string | undefined;
+
 export const readLines = async (filePath: string): Promise<string[]> => {
   const data = await fs.readFile(filePath, 'utf-8');
   return data.split(/\r?\n/);
@@ -50,10 +52,30 @@ export const getChildJsonPaths = async (dirPath: string) => {
   return childJsonNames.map((name) => path.resolve(dirPath, name));
 };
 
+export const getJsonPathsRecursively = async (
+  dirPath: string,
+): Promise<string[]> => {
+  const entries = await fs.readdir(dirPath, { withFileTypes: true });
+  const paths = await Promise.all(
+    entries.map(async (entry) => {
+      const entryPath = path.resolve(dirPath, entry.name);
+      if (entry.isDirectory()) {
+        return getJsonPathsRecursively(entryPath);
+      }
+      return entry.name.endsWith('.json') ? [entryPath] : [];
+    }),
+  );
+
+  return paths.flat();
+};
+
 // https://stackoverflow.com/a/44445384
 // It is hacky but I couldn't find other solutions
 export const getAppRoot = () => {
-  if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
+  if (
+    typeof MAIN_WINDOW_VITE_DEV_SERVER_URL !== 'undefined' &&
+    MAIN_WINDOW_VITE_DEV_SERVER_URL
+  ) {
     return app.getAppPath();
   } else if (process.platform === 'win32') {
     return path.dirname(app.getPath('exe'));

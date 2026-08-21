@@ -20,10 +20,9 @@ import {
 import {
   DeckData,
   DuelData,
-  DuelDataFile,
   GateData,
-  GateDataFile,
   StructureDeckData,
+  UnlockSecret,
 } from '../type';
 import {
   backup,
@@ -31,11 +30,19 @@ import {
   dataChapterIdToFileChapterId,
   dataChapterIdToFileGateId,
   getChildJsonPaths,
+  getJsonPathsRecursively,
   readJson,
   readLines,
   saveJson,
 } from '../utils';
 import { isCustomStructureDeckPath } from './structure-deck';
+import {
+  JsonObject,
+  SOURCE_METADATA_FILE,
+  YgoMasterSourceMetadata,
+  isJsonObject,
+  unwrapPayload,
+} from './ygoMasterJson';
 
 export const dataToFiles = async (paths: {
   dataPath: string;
@@ -45,8 +52,10 @@ export const dataToFiles = async (paths: {
 }) => {
   const { dataPath, gatePath, deckPath, structureDeckPath } = paths;
 
-  const gateData = await loadGateData(dataPath);
-  const duelDataMap = await loadDuelDataList(dataPath);
+  const { gateData, sourceDocument: soloSourceDocument } =
+    await loadGateData(dataPath);
+  const { duelDataMap, sourceDocuments: duelSourceDocuments } =
+    await loadDuelDataList(dataPath);
   const structureDeckDataList = await loadStructureDeckDataList(dataPath);
   const gateIllustrations = await loadIllustrations(dataPath);
   const { gateNames, gateDescriptions, duelDescriptions } =
@@ -79,26 +88,73 @@ export const dataToFiles = async (paths: {
     gates,
     decks,
     structureDecks,
+    sourceMetadata: {
+      version: 1,
+      solo: { document: soloSourceDocument },
+      duels: Object.fromEntries(
+        Array.from(duelSourceDocuments.entries()).map(([chapter, document]) => [
+          chapter.toString(),
+          { document },
+        ]),
+      ),
+    },
   });
 };
 
-const loadGateData = async (dataPath: string): Promise<GateData> => {
-  const rawData = await readJson<GateDataFile>(
+const loadGateData = async (
+  dataPath: string,
+): Promise<{ gateData: GateData; sourceDocument: JsonObject }> => {
+  const rawData = await readJson<JsonObject>(
     path.resolve(dataPath, 'Solo.json'),
   );
+  const source = unwrapPayload<{ Solo: GateData }>(rawData, 'Master');
 
-  return rawData.Master.Solo;
+  if (!isJsonObject(source.payload.Solo)) {
+    throw new Error('Solo.json does not contain Master.Solo');
+  }
+
+  return { gateData: source.payload.Solo as GateData, sourceDocument: source.document };
 };
 
 const loadDuelDataList = async (
   dataPath: string,
-): Promise<Map<number, DuelData>> => {
-  const duelPaths = await getChildJsonPaths(
+): Promise<{
+  duelDataMap: Map<number, DuelData>;
+  sourceDocuments: Map<number, JsonObject>;
+}> => {
+  const duelPaths = await getJsonPathsRecursively(
     path.resolve(dataPath, 'SoloDuels'),
   );
-  const rawData = await batchPromiseAll(duelPaths, readJson<DuelDataFile>);
+  const rawData = await batchPromiseAll(duelPaths, (duelPath) =>
+    readJson<JsonObject>(duelPath).then((document) => ({ duelPath, document })),
+  );
 
-  return new Map(rawData.map((data) => [data.Duel.chapter, data.Duel]));
+  const duelDataMap = new Map<number, DuelData>();
+  const sourceDocuments = new Map<number, JsonObject>();
+
+  rawData.forEach(({ duelPath, document }) => {
+    const source = unwrapPayload<DuelData>(document, 'Duel');
+    const duelData = source.payload;
+    if (typeof duelData.chapter !== 'number') {
+      throw new Error(`Duel file has no numeric chapter: ${duelPath}`);
+    }
+    if (duelDataMap.has(duelData.chapter)) {
+      throw new Error(`Duplicate duel chapter: ${duelData.chapter}`);
+    }
+    const filenameChapter = Number(
+      path.basename(duelPath, path.extname(duelPath)),
+    );
+    if (Number.isInteger(filenameChapter) && filenameChapter !== duelData.chapter) {
+      log.warn(
+        `Duel filename ${filenameChapter} differs from payload chapter ${duelData.chapter}; using payload chapter`,
+      );
+    }
+
+    duelDataMap.set(duelData.chapter, duelData);
+    sourceDocuments.set(duelData.chapter, source.document);
+  });
+
+  return { duelDataMap, sourceDocuments };
 };
 
 const loadStructureDeckDataList = async (
@@ -332,7 +388,19 @@ const createChapters = (data: {
 }): { chapters: Chapter[]; decks: DeckData[] } => {
   const { gateData, gateId, duelDataMap, duelDescriptions } = data;
 
-  const results = Object.entries(gateData.chapter[gateId]).map(
+  // The upstream Solo graph can contain gate records which are announced in
+  // `gate` before their chapter payload is shipped.  Those records are still
+  // valid input (the current runtime has several of them), so do not make
+  // import fail just because the corresponding chapter group is absent.
+  const chapterData = gateData.chapter?.[gateId];
+  if (!isJsonObject(chapterData)) {
+    log.warn(
+      `Solo gate ${gateId} has no chapter group; exporting it with zero chapters`,
+    );
+    return { chapters: [], decks: [] };
+  }
+
+  const results = Object.entries(chapterData).map(
     ([chapterKey, chapterData]) => {
       const chapterId = Number(chapterKey);
 
@@ -378,13 +446,17 @@ const createChapters = (data: {
   };
 };
 
-const createUnlockPack = (
-  unlockSecret?: number | number[],
-): number[] | undefined => {
+const createUnlockPack = (unlockSecret?: UnlockSecret): number[] | undefined => {
   if (unlockSecret === undefined) return;
   if (typeof unlockSecret === 'number') return [unlockSecret];
-  if (!unlockSecret.length) return [];
-  return unlockSecret;
+  if (Array.isArray(unlockSecret)) return unlockSecret;
+  if (!unlockSecret.trim()) return [];
+
+  return unlockSecret
+    .trim()
+    .split(/\s+/)
+    .map(Number)
+    .filter(Number.isFinite);
 };
 
 const createBaseChapter = (data: {
@@ -701,6 +773,7 @@ const saveFiles = async (data: {
   gates: Gate[];
   decks: DeckData[];
   structureDecks: StructureDeck[];
+  sourceMetadata: YgoMasterSourceMetadata;
 }) => {
   const {
     gatePath,
@@ -709,6 +782,7 @@ const saveFiles = async (data: {
     gates,
     decks,
     structureDecks,
+    sourceMetadata,
   } = data;
   log.info('Start save files');
 
@@ -718,6 +792,7 @@ const saveFiles = async (data: {
       path.basename(gatePath),
       path.basename(deckPath),
       path.basename(structureDeckPath),
+      SOURCE_METADATA_FILE,
     ],
   });
   log.info('Copied original files to backup folder');
@@ -736,4 +811,10 @@ const saveFiles = async (data: {
     saveJson(path.resolve(deckPath, `${deck.name}.json`), deck),
   );
   log.info('Created deck files');
+
+  await saveJson(
+    path.resolve(path.dirname(gatePath), SOURCE_METADATA_FILE),
+    sourceMetadata,
+  );
+  log.info('Created YgoMaster source metadata');
 };
