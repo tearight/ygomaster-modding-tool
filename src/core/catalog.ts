@@ -4,6 +4,11 @@ import path from 'node:path';
 import { atomicWriteJson, ensureDirectory, exists } from './fs';
 import { readStrictJson } from './json';
 import {
+  MaterializedCustomCard,
+  customCardDatabaseExists,
+  validateCustomCardDatabase,
+} from './card-custom';
+import {
   CatalogCacheMetadata,
   CatalogCard,
   CatalogRefreshResult,
@@ -920,9 +925,32 @@ const searchDocuments = (cards: CatalogCard[]): CatalogSearchDocument[] => {
   return documents;
 };
 
-export const searchCatalog = (cards: CatalogCard[], query: string, limit = 100): CatalogSearchResult => {
+const customSearchProjection = (cards: MaterializedCustomCard[]) => new Map(cards.map((card) => {
+  const tags = new Set<string>();
+  Object.entries(card.facets).forEach(([field, value]) => {
+    const values = Array.isArray(value) ? value : [value];
+    values.forEach((entry) => {
+      if (typeof entry === 'string' || typeof entry === 'number' || typeof entry === 'boolean') {
+        tags.add(`custom.${field}:${String(entry)}`.toLocaleLowerCase());
+      }
+    });
+  });
+  return [card.cardId, {
+    text: card.searchTerms.join(' ').normalize('NFKC').toLocaleLowerCase(),
+    tags,
+  }] as const;
+}));
+
+export const searchCatalog = (
+  cards: CatalogCard[],
+  query: string,
+  limit = 100,
+  customCards: MaterializedCustomCard[] = [],
+): CatalogSearchResult => {
   const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+  const custom = customSearchProjection(customCards);
   const matches = searchDocuments(cards).filter(({ card, text, tags }) => {
+    const customCard = custom.get(card.id);
     return terms.every((term) => {
       const colon = term.indexOf(':');
       if (colon >= 0) {
@@ -931,9 +959,9 @@ export const searchCatalog = (cards: CatalogCard[], query: string, limit = 100):
         if (!value) return false;
         if (key === 'id') return String(card.id) === value;
         if (key === 'ydk') return String(card.ydkId) === value;
-        return tags.has(term);
+        return tags.has(term) || customCard?.tags.has(term) === true;
       }
-      return text.includes(term);
+      return text.includes(term) || customCard?.text.includes(term) === true;
     });
   });
   return { query, total: matches.length, cards: matches.slice(0, Math.max(1, limit)).map(({ card }) => card) };
@@ -943,10 +971,23 @@ export const catalogSearch = async (
   projectRoot: string,
   query: string,
   limit = 100,
+  sourceRoot?: string,
 ): Promise<OperationResult<CatalogSearchResult>> => {
   const cached = await readCache(projectRoot);
   if (!cached) return failure([problem('CATALOG_CACHE_MISSING', 'Refresh the card catalog before searching')], 'COMMAND_FAILED');
-  return result(searchCatalog(cached.cards, query, limit));
+  if (!(await customCardDatabaseExists(projectRoot, sourceRoot))) return result(searchCatalog(cached.cards, query, limit));
+  const custom = await validateCustomCardDatabase(projectRoot, sourceRoot, new Set(cached.cards.map((card) => card.id)));
+  if (!custom.ok || !custom.data) {
+    const warnings = custom.problems.map((entry) => problem('CUSTOM_CARD_DATABASE_INVALID', `${entry.code}: ${entry.message}`, entry.path, 'warning'));
+    return result(searchCatalog(cached.cards, query, limit), [...custom.warnings, ...warnings]);
+  }
+  return result(searchCatalog(cached.cards, query, limit, custom.data.materializedCards), custom.warnings);
+};
+
+export const catalogCardIds = async (projectRoot: string): Promise<OperationResult<number[]>> => {
+  const cached = await readCache(projectRoot);
+  if (!cached) return failure([problem('CATALOG_CACHE_MISSING', 'Refresh the card catalog before validating custom cards')], 'COMMAND_FAILED');
+  return result(cached.cards.map((card) => card.id));
 };
 
 export const catalogCachePaths = (projectRoot: string) => ({

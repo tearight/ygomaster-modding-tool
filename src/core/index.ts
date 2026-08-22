@@ -10,3 +10,4 @@ export * from './overlay';
 export * from './deployment';
 export * from './project-root';
 export * from './catalog';
+export * from './card-custom';

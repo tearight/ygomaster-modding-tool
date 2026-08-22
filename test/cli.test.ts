@@ -15,7 +15,7 @@ const requiredCommands = [
   'trash list', 'trash restore',
   'campaign validate', 'campaign deploy',
   'runtime status', 'runtime fetch',
-  'catalog status', 'catalog refresh', 'catalog search',
+  'catalog status', 'catalog refresh', 'catalog search', 'catalog custom-validate',
   'deployment list', 'deployment inspect', 'deployment launch',
 ];
 

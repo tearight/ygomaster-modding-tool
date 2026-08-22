@@ -146,6 +146,24 @@ describe('card catalog', () => {
     assert.deepEqual(exactTags.data?.cards.map((card) => card.id), [1001]);
     assert.deepEqual((await catalogSearch(root, 'id:1001')).data?.cards.map((card) => card.id), [1001]);
     assert.deepEqual((await catalogSearch(root, 'ydk:9001')).data?.cards.map((card) => card.id), [1001]);
+
+    const customRoot = path.join(root, 'campaign', 'source', 'card-db');
+    await mkdir(path.join(customRoot, 'layers', 'reviewed'), { recursive: true });
+    await writeFile(path.join(customRoot, 'manifest.json'), JSON.stringify({
+      schemaVersion: 1,
+      revision: 1,
+      layers: [{ id: 'reviewed', priority: 200, kind: 'reviewed', directory: 'layers/reviewed' }],
+    }));
+    await writeFile(path.join(customRoot, 'layers', 'reviewed', '1002.json'), JSON.stringify({
+      schemaVersion: 1,
+      cardId: 1002,
+      revision: 1,
+      searchTerms: ['historical-control'],
+      facets: { role: ['boss'] },
+      extensions: { 'org.ygomastersolo.analysis/v1': { nested: { keep: true } } },
+    }));
+    assert.deepEqual((await catalogSearch(root, 'historical-control')).data?.cards.map((card) => card.id), [1002]);
+    assert.deepEqual((await catalogSearch(root, 'custom.role:boss')).data?.cards.map((card) => card.id), [1002]);
   });
 
   it('preserves a valid cache when a refresh transport fails', async () => {

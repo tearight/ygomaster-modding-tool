@@ -7,9 +7,11 @@ import {
   TOOL_VERSION,
   deployCampaign,
   catalogEnvironmentSources,
+  catalogCardIds,
   catalogSearch,
   catalogStatus,
   refreshCatalog,
+  validateCustomCardDatabase,
   inspectDeployment,
   inspectWorkspace,
   initWorkspace,
@@ -76,6 +78,7 @@ export const CLI_COMMAND_REGISTRY = [
   'catalog status',
   'catalog refresh',
   'catalog search',
+  'catalog custom-validate',
   'deployment list',
   'deployment inspect',
   'deployment launch',
@@ -184,7 +187,12 @@ const commandResult = async (parsed: ParsedArgs, projectRoot: string): Promise<O
   }
   if (group === 'catalog') {
     if (action === 'status') return catalogStatus(projectRoot);
-    if (action === 'search') return catalogSearch(projectRoot, parsed.positionals.join(' '), optionNumber(parsed, 'limit', 100));
+    if (action === 'search') return catalogSearch(projectRoot, parsed.positionals.join(' '), optionNumber(parsed, 'limit', 100), sourceRoot);
+    if (action === 'custom-validate') {
+      const ids = await catalogCardIds(projectRoot);
+      if (!ids.ok || !ids.data) return ids;
+      return validateCustomCardDatabase(projectRoot, sourceRoot, new Set(ids.data));
+    }
     if (action === 'refresh') {
       const configured = catalogEnvironmentSources();
       const koreanUrl = optionString(parsed, 'korean-url');
