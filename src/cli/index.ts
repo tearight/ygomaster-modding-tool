@@ -37,6 +37,7 @@ import {
   parseJsonc,
   problem,
   resolveProjectRoot,
+  isCatalogSortField,
 } from '../core';
 
 interface ParsedArgs {
@@ -187,7 +188,12 @@ const commandResult = async (parsed: ParsedArgs, projectRoot: string): Promise<O
   }
   if (group === 'catalog') {
     if (action === 'status') return catalogStatus(projectRoot);
-    if (action === 'search') return catalogSearch(projectRoot, parsed.positionals.join(' '), optionNumber(parsed, 'limit', 100), sourceRoot);
+    if (action === 'search') {
+      const sortValue = optionString(parsed, 'sort') || 'id';
+      const direction = optionString(parsed, 'order') === 'desc' ? 'desc' as const : 'asc' as const;
+      if (!isCatalogSortField(sortValue)) return failure([problem('USAGE', `Unsupported catalog sort field ${sortValue}`)], 'USAGE_ERROR');
+      return catalogSearch(projectRoot, parsed.positionals.join(' '), optionNumber(parsed, 'limit', 100), sourceRoot, optionNumber(parsed, 'offset', 0), { field: sortValue, direction });
+    }
     if (action === 'custom-validate') {
       const ids = await catalogCardIds(projectRoot);
       if (!ids.ok || !ids.data) return ids;

@@ -12,6 +12,7 @@
     "test:compatibility": "node --test --require ts-node/register test/compatibility.test.ts",
     "test": "npm run test:compatibility && node --test --require ts-node/register test/core.test.ts test/cli.test.ts test/catalog.test.ts test/card-custom.test.ts",
     "build:cli": "tsc -p tsconfig.cli.json",
+    "benchmark:catalog": "npm run build:cli && node scripts/benchmark-catalog.mjs --size=14000 --rounds=20 --assert",
     "build:release": "node scripts/build-release.mjs",
     "smoke:release": "node scripts/smoke-release.mjs",
     "smoke:deploy": "node scripts/smoke-deploy.mjs",

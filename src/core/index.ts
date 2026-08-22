@@ -11,3 +11,4 @@ export * from './deployment';
 export * from './project-root';
 export * from './catalog';
 export * from './card-custom';
+export * from './catalog-query';

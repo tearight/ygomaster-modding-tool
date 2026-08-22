@@ -9,6 +9,14 @@ import {
   validateCustomCardDatabase,
 } from './card-custom';
 import {
+  CatalogQueryDocument,
+  CatalogExpression,
+  CatalogSortField,
+  compareCatalogCards,
+  evaluateCatalogExpression,
+  parseCatalogQuery,
+} from './catalog-query';
+import {
   CatalogCacheMetadata,
   CatalogCard,
   CatalogRefreshResult,
@@ -909,6 +917,9 @@ interface CatalogSearchDocument {
   card: CatalogCard;
   text: string;
   tags: Set<string>;
+  nameText: string;
+  names: Set<string>;
+  effectText: string;
 }
 
 const searchDocumentCache = new WeakMap<CatalogCard[], CatalogSearchDocument[]>();
@@ -920,6 +931,9 @@ const searchDocuments = (cards: CatalogCard[]): CatalogSearchDocument[] => {
     card,
     text: searchPlainText(card),
     tags: new Set(card.autoTags.map((tag) => tag.toLocaleLowerCase())),
+    nameText: [card.names.display, card.names.korean, card.names.english].filter(Boolean).join(' ').normalize('NFKC').toLocaleLowerCase(),
+    names: new Set([card.names.display, card.names.korean, card.names.english].filter((value): value is string => Boolean(value)).map((value) => value.normalize('NFKC').toLocaleLowerCase())),
+    effectText: [card.texts.display, card.texts.korean, card.texts.english].filter(Boolean).join(' ').normalize('NFKC').toLocaleLowerCase(),
   }));
   searchDocumentCache.set(cards, documents);
   return documents;
@@ -941,30 +955,48 @@ const customSearchProjection = (cards: MaterializedCustomCard[]) => new Map(card
   }] as const;
 }));
 
+export interface CatalogExpressionSearchOptions {
+  queryLabel?: string;
+  limit?: number;
+  offset?: number;
+  sort?: { field: CatalogSortField; direction: 'asc' | 'desc' };
+}
+
+export const searchCatalogExpression = (
+  cards: CatalogCard[],
+  expression: CatalogExpression,
+  customCards: MaterializedCustomCard[] = [],
+  options: CatalogExpressionSearchOptions = {},
+): CatalogSearchResult => {
+  const custom = customSearchProjection(customCards);
+  const matches = searchDocuments(cards).filter(({ card, text, tags, nameText, names, effectText }) => {
+    const customCard = custom.get(card.id);
+    const document: CatalogQueryDocument = {
+      card,
+      anyText: `${text} ${customCard?.text || ''}`,
+      nameText,
+      names,
+      effectText,
+      tags: new Set([...tags, ...(customCard?.tags || [])]),
+    };
+    return evaluateCatalogExpression(expression, document);
+  });
+  const safeOffset = Math.max(0, Math.trunc(options.offset ?? 0));
+  const safeLimit = Math.max(1, Math.min(1000, Math.trunc(options.limit ?? 100)));
+  const sort = options.sort || { field: 'id', direction: 'asc' };
+  const sorted = matches.map(({ card }) => card).sort((left, right) => compareCatalogCards(left, right, sort.field, sort.direction));
+  return { query: options.queryLabel || '', total: sorted.length, offset: safeOffset, limit: safeLimit, cards: sorted.slice(safeOffset, safeOffset + safeLimit) };
+};
+
 export const searchCatalog = (
   cards: CatalogCard[],
   query: string,
   limit = 100,
   customCards: MaterializedCustomCard[] = [],
+  offset = 0,
+  sort: { field: CatalogSortField; direction: 'asc' | 'desc' } = { field: 'id', direction: 'asc' },
 ): CatalogSearchResult => {
-  const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
-  const custom = customSearchProjection(customCards);
-  const matches = searchDocuments(cards).filter(({ card, text, tags }) => {
-    const customCard = custom.get(card.id);
-    return terms.every((term) => {
-      const colon = term.indexOf(':');
-      if (colon >= 0) {
-        const key = term.slice(0, colon);
-        const value = term.slice(colon + 1);
-        if (!value) return false;
-        if (key === 'id') return String(card.id) === value;
-        if (key === 'ydk') return String(card.ydkId) === value;
-        return tags.has(term) || customCard?.tags.has(term) === true;
-      }
-      return text.includes(term) || customCard?.text.includes(term) === true;
-    });
-  });
-  return { query, total: matches.length, cards: matches.slice(0, Math.max(1, limit)).map(({ card }) => card) };
+  return searchCatalogExpression(cards, parseCatalogQuery(query), customCards, { queryLabel: query, limit, offset, sort });
 };
 
 export const catalogSearch = async (
@@ -972,16 +1004,18 @@ export const catalogSearch = async (
   query: string,
   limit = 100,
   sourceRoot?: string,
+  offset = 0,
+  sort: { field: CatalogSortField; direction: 'asc' | 'desc' } = { field: 'id', direction: 'asc' },
 ): Promise<OperationResult<CatalogSearchResult>> => {
   const cached = await readCache(projectRoot);
   if (!cached) return failure([problem('CATALOG_CACHE_MISSING', 'Refresh the card catalog before searching')], 'COMMAND_FAILED');
-  if (!(await customCardDatabaseExists(projectRoot, sourceRoot))) return result(searchCatalog(cached.cards, query, limit));
+  if (!(await customCardDatabaseExists(projectRoot, sourceRoot))) return result(searchCatalog(cached.cards, query, limit, [], offset, sort));
   const custom = await validateCustomCardDatabase(projectRoot, sourceRoot, new Set(cached.cards.map((card) => card.id)));
   if (!custom.ok || !custom.data) {
     const warnings = custom.problems.map((entry) => problem('CUSTOM_CARD_DATABASE_INVALID', `${entry.code}: ${entry.message}`, entry.path, 'warning'));
-    return result(searchCatalog(cached.cards, query, limit), [...custom.warnings, ...warnings]);
+    return result(searchCatalog(cached.cards, query, limit, [], offset, sort), [...custom.warnings, ...warnings]);
   }
-  return result(searchCatalog(cached.cards, query, limit, custom.data.materializedCards), custom.warnings);
+  return result(searchCatalog(cached.cards, query, limit, custom.data.materializedCards, offset, sort), custom.warnings);
 };
 
 export const catalogCardIds = async (projectRoot: string): Promise<OperationResult<number[]>> => {

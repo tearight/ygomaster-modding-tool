@@ -10,6 +10,7 @@ import {
   catalogSearch,
   catalogStatus,
   refreshCatalog,
+  searchCatalogExpression,
 } from '../src/core';
 import { runCli } from '../src/cli';
 
@@ -146,6 +147,19 @@ describe('card catalog', () => {
     assert.deepEqual(exactTags.data?.cards.map((card) => card.id), [1001]);
     assert.deepEqual((await catalogSearch(root, 'id:1001')).data?.cards.map((card) => card.id), [1001]);
     assert.deepEqual((await catalogSearch(root, 'ydk:9001')).data?.cards.map((card) => card.id), [1001]);
+    assert.deepEqual((await catalogSearch(root, 'atk>=2900')).data?.cards.map((card) => card.id), [1001]);
+    assert.deepEqual((await catalogSearch(root, 'level>=8 -atk:3000')).data?.cards.map((card) => card.id), [1004]);
+    assert.deepEqual((await catalogSearch(root, 'name^:dark')).data?.cards.map((card) => card.id), [1002]);
+    assert.deepEqual((await catalogSearch(root, '"draw one"')).data?.cards.map((card) => card.id), [1002]);
+    assert.deepEqual((await catalogSearch(root, '', 1, undefined, 1)).data?.cards.map((card) => card.id), [1002]);
+    assert.deepEqual((await catalogSearch(root, '', 2, undefined, 0, { field: 'atk', direction: 'desc' })).data?.cards.map((card) => card.id), [1001, 1004]);
+    assert.deepEqual(searchCatalogExpression(refreshed.data?.cards || [], {
+      kind: 'or',
+      terms: [
+        { kind: 'exact', field: 'id', value: 1001 },
+        { kind: 'range', field: 'atk', gte: 2800, lte: 2800 },
+      ],
+    }).cards.map((card) => card.id), [1001, 1004]);
 
     const customRoot = path.join(root, 'campaign', 'source', 'card-db');
     await mkdir(path.join(customRoot, 'layers', 'reviewed'), { recursive: true });

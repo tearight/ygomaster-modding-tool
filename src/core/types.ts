@@ -254,6 +254,8 @@ export interface CatalogRefreshResult {
 export interface CatalogSearchResult {
   query: string;
   total: number;
+  offset?: number;
+  limit?: number;
   cards: CatalogCard[];
 }
 
