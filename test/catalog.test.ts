@@ -170,6 +170,27 @@ describe('card catalog', () => {
     assert.equal((await catalogStatus(root)).data?.valid, true);
   });
 
+  it('treats generated cache files as strict JSON and invalidates changed generations', async () => {
+    const root = await makeRoot();
+    const refreshed = await refreshCatalog(root, {
+      sources: [{ id: 'english', language: 'english', url: 'fixture://en', format: 'json' }],
+      transport: { getBytes: async () => jsonBytes([{ id: 9001, name: 'First Name', desc: 'Fixture text.' }]) },
+      ygoMaster: { cardList: { '1001': 4 }, ydkIds: '9001 1001' },
+    });
+    assert.equal(refreshed.ok, true);
+    const filePath = refreshed.data?.status.catalogPath as string;
+    const document = JSON.parse(await readFile(filePath, 'utf8')) as { cards: Array<{ names: { display: string } }> };
+
+    document.cards[0].names.display = 'Changed Name With Different Size';
+    await writeFile(filePath, JSON.stringify(document));
+    assert.deepEqual((await catalogSearch(root, 'Changed Name')).data?.cards.map((card) => card.id), [1001]);
+
+    await writeFile(filePath, `// generated cache must stay strict JSON\n${JSON.stringify(document)}`);
+    const invalid = await catalogSearch(root, 'Changed Name');
+    assert.equal(invalid.ok, false);
+    assert.equal(invalid.problems[0]?.code, 'CATALOG_CACHE_MISSING');
+  });
+
   it('stores raw sources, stays local-first, and atomically replaces them online', async () => {
     const root = await makeRoot();
     const sources = [

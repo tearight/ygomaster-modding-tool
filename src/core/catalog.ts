@@ -1,7 +1,8 @@
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
 
-import { atomicWriteJson, ensureDirectory, exists, readJsonFile } from './fs';
+import { atomicWriteJson, ensureDirectory, exists } from './fs';
+import { readStrictJson } from './json';
 import {
   CatalogCacheMetadata,
   CatalogCard,
@@ -57,6 +58,31 @@ const sourcePathMap = (projectRoot: string): Partial<Record<'korean' | 'english'
   korean: sourcePath(projectRoot, 'korean'),
   english: sourcePath(projectRoot, 'english'),
 });
+
+interface CatalogMemoryEntry {
+  catalogMtimeMs: number;
+  catalogSize: number;
+  metadataMtimeMs: number;
+  metadataSize: number;
+  cards: CatalogCard[];
+  metadata: CatalogCacheMetadata;
+}
+
+const catalogMemoryCache = new Map<string, CatalogMemoryEntry>();
+
+const invalidateCatalogMemoryCache = (projectRoot: string) => {
+  catalogMemoryCache.delete(cacheRoot(projectRoot));
+};
+
+const rememberCatalog = (key: string, entry: CatalogMemoryEntry) => {
+  catalogMemoryCache.delete(key);
+  catalogMemoryCache.set(key, entry);
+  while (catalogMemoryCache.size > 4) {
+    const oldest = catalogMemoryCache.keys().next().value as string | undefined;
+    if (!oldest) break;
+    catalogMemoryCache.delete(oldest);
+  }
+};
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -710,14 +736,38 @@ const commitSourceBytes = async (
 };
 
 const readCache = async (projectRoot: string): Promise<{ cards: CatalogCard[]; metadata: CatalogCacheMetadata } | undefined> => {
+  const key = cacheRoot(projectRoot);
   try {
+    const [catalogFile, metadataFile] = await Promise.all([
+      fs.stat(catalogPath(projectRoot)),
+      fs.stat(metadataPath(projectRoot)),
+    ]);
+    const remembered = catalogMemoryCache.get(key);
+    if (
+      remembered
+      && remembered.catalogMtimeMs === catalogFile.mtimeMs
+      && remembered.catalogSize === catalogFile.size
+      && remembered.metadataMtimeMs === metadataFile.mtimeMs
+      && remembered.metadataSize === metadataFile.size
+    ) {
+      return { cards: remembered.cards, metadata: remembered.metadata };
+    }
     const [catalog, metadata] = await Promise.all([
-      readJsonFile<{ schemaVersion?: number; cards?: CatalogCard[] }>(catalogPath(projectRoot)),
-      readJsonFile<CatalogCacheMetadata>(metadataPath(projectRoot)),
+      readStrictJson<{ schemaVersion?: number; cards?: CatalogCard[] }>(catalogPath(projectRoot)),
+      readStrictJson<CatalogCacheMetadata>(metadataPath(projectRoot)),
     ]);
     if (catalog.schemaVersion !== 1 || !Array.isArray(catalog.cards) || metadata.schemaVersion !== 1) return;
+    rememberCatalog(key, {
+      catalogMtimeMs: catalogFile.mtimeMs,
+      catalogSize: catalogFile.size,
+      metadataMtimeMs: metadataFile.mtimeMs,
+      metadataSize: metadataFile.size,
+      cards: catalog.cards,
+      metadata,
+    });
     return { cards: catalog.cards, metadata };
   } catch {
+    catalogMemoryCache.delete(key);
     return;
   }
 };
@@ -820,6 +870,7 @@ export const refreshCatalog = async (
     await ensureDirectory(cacheRoot(projectRoot));
     await atomicWriteJson(catalogPath(projectRoot), { schemaVersion: 1, cards });
     await atomicWriteJson(metadataPath(projectRoot), metadata);
+    invalidateCatalogMemoryCache(projectRoot);
     const status = await catalogStatus(projectRoot);
     if (!status.data) throw new Error('Catalog cache status could not be read after refresh');
     const usages = Object.values(sourceUsage);
@@ -849,11 +900,29 @@ const searchPlainText = (card: CatalogCard): string => [
   card.texts.english,
 ].filter((value) => value !== undefined).join(' ').toLocaleLowerCase();
 
+interface CatalogSearchDocument {
+  card: CatalogCard;
+  text: string;
+  tags: Set<string>;
+}
+
+const searchDocumentCache = new WeakMap<CatalogCard[], CatalogSearchDocument[]>();
+
+const searchDocuments = (cards: CatalogCard[]): CatalogSearchDocument[] => {
+  const remembered = searchDocumentCache.get(cards);
+  if (remembered) return remembered;
+  const documents = cards.map((card) => ({
+    card,
+    text: searchPlainText(card),
+    tags: new Set(card.autoTags.map((tag) => tag.toLocaleLowerCase())),
+  }));
+  searchDocumentCache.set(cards, documents);
+  return documents;
+};
+
 export const searchCatalog = (cards: CatalogCard[], query: string, limit = 100): CatalogSearchResult => {
   const terms = query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
-  const matches = cards.filter((card) => {
-    const text = searchPlainText(card);
-    const tags = new Set(card.autoTags.map((tag) => tag.toLocaleLowerCase()));
+  const matches = searchDocuments(cards).filter(({ card, text, tags }) => {
     return terms.every((term) => {
       const colon = term.indexOf(':');
       if (colon >= 0) {
@@ -867,7 +936,7 @@ export const searchCatalog = (cards: CatalogCard[], query: string, limit = 100):
       return text.includes(term);
     });
   });
-  return { query, total: matches.length, cards: matches.slice(0, Math.max(1, limit)) };
+  return { query, total: matches.length, cards: matches.slice(0, Math.max(1, limit)).map(({ card }) => card) };
 };
 
 export const catalogSearch = async (
