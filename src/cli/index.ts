@@ -6,6 +6,10 @@ import {
   CONTRACT_VERSION,
   TOOL_VERSION,
   deployCampaign,
+  catalogEnvironmentSources,
+  catalogSearch,
+  catalogStatus,
+  refreshCatalog,
   inspectDeployment,
   inspectWorkspace,
   initWorkspace,
@@ -69,6 +73,9 @@ export const CLI_COMMAND_REGISTRY = [
   'campaign deploy',
   'runtime status',
   'runtime fetch',
+  'catalog status',
+  'catalog refresh',
+  'catalog search',
   'deployment list',
   'deployment inspect',
   'deployment launch',
@@ -107,6 +114,13 @@ const optionString = (parsed: ParsedArgs, key: string) => {
   return typeof value === 'string' ? value : undefined;
 };
 
+const optionNumber = (parsed: ParsedArgs, key: string, fallback: number) => {
+  const value = optionString(parsed, key);
+  if (!value) return fallback;
+  const parsedValue = Number(value);
+  return Number.isInteger(parsedValue) && parsedValue > 0 ? parsedValue : fallback;
+};
+
 const findProjectRoot = (): string => {
   const configured = process.env.YGOMASTER_TOOL_PROJECT_ROOT;
   if (configured) return path.resolve(configured);
@@ -127,7 +141,7 @@ const readStdin = async (): Promise<string> => {
 };
 
 const usage = () =>
-  'Usage: node cli/index.js <command> [subcommand] [path] [--source path] [--game-root path] [--pretty]';
+  'Usage: node cli/index.js <command> [subcommand] [path] [--source path] [--game-root path] [--online] [--pretty]';
 
 const commandResult = async (parsed: ParsedArgs, projectRoot: string): Promise<OperationResult<unknown>> => {
   const config = await readConfig(projectRoot);
@@ -167,6 +181,27 @@ const commandResult = async (parsed: ParsedArgs, projectRoot: string): Promise<O
   if (group === 'runtime') {
     if (action === 'status') return runtimeStatus(projectRoot);
     if (action === 'fetch') return runtimeFetch(projectRoot);
+  }
+  if (group === 'catalog') {
+    if (action === 'status') return catalogStatus(projectRoot);
+    if (action === 'search') return catalogSearch(projectRoot, parsed.positionals.join(' '), optionNumber(parsed, 'limit', 100));
+    if (action === 'refresh') {
+      const configured = catalogEnvironmentSources();
+      const koreanUrl = optionString(parsed, 'korean-url');
+      const englishUrl = optionString(parsed, 'english-url');
+      const format = optionString(parsed, 'format') === 'json' ? 'json' as const : 'sqlite' as const;
+      const online = parsed.options.get('online') === true;
+      const sources = [
+        ...(koreanUrl ? [{ id: 'korean', language: 'korean' as const, url: koreanUrl, format }] : []),
+        ...(englishUrl ? [{ id: 'english', language: 'english' as const, url: englishUrl, format }] : []),
+      ];
+      const refreshed = await refreshCatalog(projectRoot, { sources: sources.length ? sources : configured, online });
+      if (!refreshed.ok || !refreshed.data) return refreshed;
+      return {
+        ...refreshed,
+        data: { status: refreshed.data.status, cacheHit: refreshed.data.cacheHit, sourceUsage: refreshed.data.sourceUsage },
+      };
+    }
   }
   if (group === 'deployment') {
     if (action === 'list') {

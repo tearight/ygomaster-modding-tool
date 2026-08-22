@@ -34,6 +34,9 @@ import {
   UPDATE_STRUCTURE_DECK,
   CAMPAIGN_DEPLOY,
   CAMPAIGN_VALIDATE,
+  CATALOG_REFRESH,
+  CATALOG_SEARCH,
+  CATALOG_STATUS,
   CONFIG_SET_GAME_ROOT,
   CONFIG_SET_SOURCE_ROOT,
   CONFIG_SHOW,
@@ -77,6 +80,9 @@ import {
   TOOL_VERSION,
   deleteDocument,
   deployCampaign,
+  catalogSearch,
+  catalogStatus,
+  refreshCatalog,
   getWorkspacePaths,
   inspectDeployment,
   inspectWorkspace,
@@ -95,7 +101,7 @@ import {
   validateCampaign,
   writeDocument,
 } from '../core';
-import type { CoreOperationResult, CorePathRequest, CorePathsRequest } from '../common/type';
+import type { CatalogRefreshRequest, CatalogSearchRequest, CoreOperationResult, CorePathRequest, CorePathsRequest } from '../common/type';
 import { readJson, saveJson } from './utils';
 
 const handleOpenDirectory = async (
@@ -388,6 +394,15 @@ const handleCampaignDeploy = (app: App) => async (
 
 const handleRuntimeStatus = (app: App) => async () => runtimeStatus(getCoreProjectRoot(app));
 const handleRuntimeFetch = (app: App) => async () => runtimeFetch(getCoreProjectRoot(app), { logger: coreLogger });
+const handleCatalogStatus = (app: App) => async () => catalogStatus(getCoreProjectRoot(app));
+const handleCatalogRefresh = (app: App) => async (
+  _event: IpcMainInvokeEvent,
+  request: CatalogRefreshRequest = {},
+) => refreshCatalog(getCoreProjectRoot(app), { online: request.online === true, logger: coreLogger });
+const handleCatalogSearch = (app: App) => async (
+  _event: IpcMainInvokeEvent,
+  request: CatalogSearchRequest,
+) => catalogSearch(getCoreProjectRoot(app), request.query, request.limit);
 
 const handleDeploymentList = (app: App) => async (
   _event: IpcMainInvokeEvent,
@@ -456,6 +471,9 @@ export const handleIpc = (app: App) => {
   handleWithLog(CAMPAIGN_DEPLOY, handleCampaignDeploy(app));
   handleWithLog(RUNTIME_STATUS, handleRuntimeStatus(app));
   handleWithLog(RUNTIME_FETCH, handleRuntimeFetch(app));
+  handleWithLog(CATALOG_STATUS, handleCatalogStatus(app));
+  handleWithLog(CATALOG_REFRESH, handleCatalogRefresh(app));
+  handleWithLog(CATALOG_SEARCH, handleCatalogSearch(app));
   handleWithLog(DEPLOYMENT_LIST, handleDeploymentList(app));
   handleWithLog(DEPLOYMENT_INSPECT, handleDeploymentInspect);
   handleWithLog(DEPLOYMENT_LAUNCH, handleDeploymentLaunch);

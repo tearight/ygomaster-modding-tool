@@ -4,10 +4,11 @@ import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-const projectRoot = process.cwd();
+const editorRoot = process.cwd();
+const workspaceRoot = path.resolve(editorRoot, '..', '..');
 const appCandidates = [
-  path.join(projectRoot, 'release', 'modding-tool', 'app', 'ygomaster-modding-tool.exe'),
-  path.join(projectRoot, 'out', 'ygomaster-modding-tool-win32-x64', 'ygomaster-modding-tool.exe'),
+  path.join(workspaceRoot, 'release', 'modding-tool', 'app', 'ygomaster-modding-tool.exe'),
+  path.join(editorRoot, 'out', 'ygomaster-modding-tool-win32-x64', 'ygomaster-modding-tool.exe'),
 ];
 const appPath = process.env.YGOMASTER_APP_EXE || appCandidates.find((candidate) => existsSync(candidate)) || appCandidates[0];
 const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'ygomaster-app-smoke-'));

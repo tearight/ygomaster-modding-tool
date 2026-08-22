@@ -44,6 +44,35 @@ const useStyles = makeStyles({
     flexDirection: 'column',
     gap: tokens.spacingVerticalM,
   },
+  catalog: {
+    marginTop: tokens.spacingVerticalL,
+  },
+  catalogSearch: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: tokens.spacingHorizontalS,
+    alignItems: 'end',
+  },
+  catalogInput: {
+    flex: '1 1 360px',
+  },
+  catalogResults: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalXS,
+    padding: 0,
+    maxHeight: '320px',
+    overflowY: 'auto',
+  },
+  catalogResult: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: tokens.spacingHorizontalS,
+  },
+  catalogName: {
+    flex: '1 1 280px',
+  },
   json: {
     minHeight: '420px',
     fontFamily: 'Consolas, monospace',
@@ -66,6 +95,18 @@ const readPaths = (operation: CoreOperationResult): string[] => {
   return Array.isArray(paths) && paths.every((value): value is string => typeof value === 'string') ? paths : [];
 };
 
+interface CatalogCardResult {
+  id: number;
+  ydkId?: number;
+  names?: { display?: string; korean?: string; english?: string };
+  autoTags?: string[];
+}
+
+const readCatalogCards = (operation: CoreOperationResult): CatalogCardResult[] => {
+  const cards = (operation.data as { cards?: unknown } | undefined)?.cards;
+  return Array.isArray(cards) ? cards.filter((value): value is CatalogCardResult => Boolean(value && typeof value === 'object' && typeof (value as { id?: unknown }).id === 'number')) : [];
+};
+
 export const DeckList = () => {
   const classes = useStyles();
   const [paths, setPaths] = useState<string[]>([]);
@@ -75,6 +116,9 @@ export const DeckList = () => {
   const [replace, setReplace] = useState(false);
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
+  const [catalogQuery, setCatalogQuery] = useState('');
+  const [catalogCards, setCatalogCards] = useState<CatalogCardResult[]>([]);
+  const [catalogMessage, setCatalogMessage] = useState('');
 
   const refresh = useCallback(async () => {
     setBusy(true);
@@ -93,6 +137,63 @@ export const DeckList = () => {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    void window.electron.catalogStatus().then((operation) => {
+      const data = operation.data as { valid?: boolean; cardCount?: number } | undefined;
+      setCatalogMessage(data?.valid ? `Catalog cache: ${data.cardCount || 0} cards` : 'Catalog cache is not ready.');
+    });
+  }, []);
+
+  const searchCatalog = useCallback(async () => {
+    setBusy(true);
+    try {
+      const operation = await window.electron.catalogSearch({ query: catalogQuery, limit: 80 });
+      if (!operation.ok) throw new Error(operationError(operation));
+      setCatalogCards(readCatalogCards(operation));
+      const total = (operation.data as { total?: unknown } | undefined)?.total;
+      setCatalogMessage(`${typeof total === 'number' ? total : catalogCards.length} matching cards`);
+    } catch (error) {
+      setCatalogCards([]);
+      setCatalogMessage(String(error));
+    } finally {
+      setBusy(false);
+    }
+  }, [catalogCards.length, catalogQuery]);
+
+  const refreshCatalog = useCallback(async (online = false) => {
+    setBusy(true);
+    try {
+      const operation = await window.electron.catalogRefresh(online ? { online: true } : undefined);
+      if (!operation.ok) throw new Error(operationError(operation));
+      const data = operation.data as { status?: { cardCount?: number }; sourceUsage?: Record<string, string> } | undefined;
+      const warning = operation.warnings?.map(({ code, message }) => `${code}: ${message}`).join('\n');
+      const usage = Object.values(data?.sourceUsage || {}).join(', ');
+      setCatalogMessage(`${warning ? `Catalog warning: ${warning} ` : `Catalog ${online ? 'updated from internet' : 'rebuilt from local cache'}: `}${data?.status?.cardCount || 0} cards${usage ? ` (${usage})` : ''}`);
+    } catch (error) {
+      setCatalogMessage(String(error));
+    } finally {
+      setBusy(false);
+    }
+  }, []);
+
+  const addCardToDeck = useCallback((id: number) => {
+    try {
+      const parsed = JSON.parse(jsonText) as Record<string, unknown>;
+      const main = parsed.m && typeof parsed.m === 'object' && !Array.isArray(parsed.m)
+        ? parsed.m as Record<string, unknown>
+        : { ids: [], r: [] };
+      const ids = Array.isArray(main.ids) ? main.ids.filter((value): value is number => typeof value === 'number') : [];
+      const rarities = Array.isArray(main.r) ? main.r.filter((value): value is number => typeof value === 'number') : [];
+      ids.push(id);
+      rarities.push(1);
+      parsed.m = { ...main, ids, r: rarities };
+      setJsonText(JSON.stringify(parsed, null, 2));
+      setMessage(`Added card ${id} to main deck. Save the document to persist it.`);
+    } catch (error) {
+      setMessage(`Create or load a JSON deck before adding a card: ${String(error)}`);
+    }
+  }, [jsonText]);
 
   const read = useCallback(async (relativePath: string) => {
     setBusy(true);
@@ -226,6 +327,32 @@ export const DeckList = () => {
           </div>
         </Card>
       </div>
+      <Card className={classes.catalog}>
+        <CardHeader
+          header={<Body1>Card catalog</Body1>}
+          description={<Caption1>Search Korean/English names, effect tokens, type, attribute, race, level, rank, link, ATK, and DEF tags.</Caption1>}
+        />
+        <div className={classes.catalogSearch}>
+          <Field className={classes.catalogInput} label="Search" hint="Examples: 블루 type:monster race:dragon level:4">
+            <Input value={catalogQuery} onChange={(_, data) => setCatalogQuery(data.value)} onKeyDown={(event) => { if (event.key === 'Enter') void searchCatalog(); }} />
+          </Field>
+          <Button appearance="primary" disabled={busy} onClick={() => void searchCatalog()}>Search</Button>
+          <Button disabled={busy} onClick={() => void refreshCatalog(false)}>Refresh local</Button>
+          <Button disabled={busy} onClick={() => void refreshCatalog(true)}>Update from internet</Button>
+        </div>
+        {catalogMessage && <Caption1 className={classes.message}>{catalogMessage}</Caption1>}
+        <ul className={classes.catalogResults}>
+          {catalogCards.map((card) => (
+            <li className={classes.catalogResult} key={card.id}>
+              <Button className={classes.catalogName} appearance="subtle" onClick={() => addCardToDeck(card.id)} disabled={busy}>
+                {card.names?.display || `#${card.id}`} (ID {card.id})
+              </Button>
+              <Caption1>{(card.autoTags || []).slice(0, 8).join(' · ')}</Caption1>
+              <Button size="small" onClick={() => addCardToDeck(card.id)} disabled={busy}>Add main</Button>
+            </li>
+          ))}
+        </ul>
+      </Card>
     </div>
   );
 };

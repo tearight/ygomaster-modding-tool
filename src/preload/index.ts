@@ -27,6 +27,9 @@ import {
   UPDATE_STRUCTURE_DECK,
   CAMPAIGN_DEPLOY,
   CAMPAIGN_VALIDATE,
+  CATALOG_REFRESH,
+  CATALOG_SEARCH,
+  CATALOG_STATUS,
   CONFIG_SET_GAME_ROOT,
   CONFIG_SET_SOURCE_ROOT,
   CONFIG_SHOW,
@@ -57,6 +60,8 @@ import {
   CoreOperationResult,
   CorePathRequest,
   CorePathsRequest,
+  CatalogRefreshRequest,
+  CatalogSearchRequest,
 } from '../common/type';
 
 // prettier-ignore
@@ -93,6 +98,9 @@ contextBridge.exposeInMainWorld('electron', {
   campaignDeploy: (request?: CorePathsRequest) => ipcRenderer.invoke(CAMPAIGN_DEPLOY, request),
   runtimeStatus: () => ipcRenderer.invoke(RUNTIME_STATUS),
   runtimeFetch: () => ipcRenderer.invoke(RUNTIME_FETCH),
+  catalogStatus: (): Promise<CoreOperationResult> => ipcRenderer.invoke(CATALOG_STATUS),
+  catalogRefresh: (request?: CatalogRefreshRequest): Promise<CoreOperationResult> => ipcRenderer.invoke(CATALOG_REFRESH, request),
+  catalogSearch: (request: CatalogSearchRequest): Promise<CoreOperationResult> => ipcRenderer.invoke(CATALOG_SEARCH, request),
   deploymentList: (request?: CorePathsRequest) => ipcRenderer.invoke(DEPLOYMENT_LIST, request),
   deploymentInspect: (request: CorePathRequest) => ipcRenderer.invoke(DEPLOYMENT_INSPECT, request),
   deploymentLaunch: (request: CorePathRequest) => ipcRenderer.invoke(DEPLOYMENT_LAUNCH, request),

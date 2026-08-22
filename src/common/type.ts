@@ -399,3 +399,12 @@ export interface CorePathsRequest {
 export interface CorePathRequest {
   path: string;
 }
+
+export interface CatalogSearchRequest {
+  query: string;
+  limit?: number;
+}
+
+export interface CatalogRefreshRequest {
+  online?: boolean;
+}

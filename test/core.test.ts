@@ -17,6 +17,7 @@ import {
   listTrash,
   restoreTrash,
   resolveProjectRoot,
+  resolveWorkspaceDataRoot,
   validateCampaign,
 } from '../src/core';
 
@@ -74,6 +75,16 @@ describe('core contracts', () => {
     await fs.writeFile(path.join(releaseRoot, 'manifest.json'), '{}');
     assert.equal(resolveProjectRoot(path.join(releaseRoot, 'app')), releaseRoot);
     assert.equal(resolveProjectRoot(path.join(releaseRoot, 'cli')), releaseRoot);
+
+    await fs.mkdir(path.join(root, 'campaign', 'source'), { recursive: true });
+    await fs.writeFile(path.join(root, 'campaign', 'source', 'manifest.json'), '{}');
+    const sourceAnchor = path.join(root, 'repositories', 'ygomaster-modding-tool');
+    const releaseAnchor = path.join(root, 'release', 'modding-tool', 'cli');
+    assert.equal(resolveWorkspaceDataRoot(sourceAnchor), root);
+    assert.equal(resolveWorkspaceDataRoot(releaseAnchor), root);
+
+    const portable = await makeRoot();
+    assert.equal(resolveWorkspaceDataRoot(portable), portable);
   });
 
   it('implements workspace CRUD with replace trash and restore', async () => {

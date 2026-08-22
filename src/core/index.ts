@@ -9,3 +9,4 @@ export * from './runtime';
 export * from './overlay';
 export * from './deployment';
 export * from './project-root';
+export * from './catalog';

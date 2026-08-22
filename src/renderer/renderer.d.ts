@@ -26,6 +26,8 @@ import {
   CoreOperationResult,
   CorePathRequest,
   CorePathsRequest,
+  CatalogRefreshRequest,
+  CatalogSearchRequest,
 } from '../common/type';
 
 export interface ElectronAPI {
@@ -69,6 +71,9 @@ export interface ElectronAPI {
   campaignDeploy: (request?: CorePathsRequest) => Promise<CoreOperationResult>;
   runtimeStatus: () => Promise<CoreOperationResult>;
   runtimeFetch: () => Promise<CoreOperationResult>;
+  catalogStatus: () => Promise<CoreOperationResult>;
+  catalogRefresh: (request?: CatalogRefreshRequest) => Promise<CoreOperationResult>;
+  catalogSearch: (request: CatalogSearchRequest) => Promise<CoreOperationResult>;
   deploymentList: (request?: CorePathsRequest) => Promise<CoreOperationResult>;
   deploymentInspect: (request: CorePathRequest) => Promise<CoreOperationResult>;
   deploymentLaunch: (request: CorePathRequest) => Promise<CoreOperationResult>;

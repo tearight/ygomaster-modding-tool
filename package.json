@@ -10,7 +10,7 @@
     "make": "electron-forge make",
     "publish": "electron-forge publish",
     "test:compatibility": "node --test --require ts-node/register test/compatibility.test.ts",
-    "test": "npm run test:compatibility && node --test --require ts-node/register test/core.test.ts test/cli.test.ts",
+    "test": "npm run test:compatibility && node --test --require ts-node/register test/core.test.ts test/cli.test.ts test/catalog.test.ts",
     "build:cli": "tsc -p tsconfig.cli.json",
     "build:release": "node scripts/build-release.mjs",
     "smoke:release": "node scripts/smoke-release.mjs",

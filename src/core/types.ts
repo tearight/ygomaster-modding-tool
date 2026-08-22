@@ -133,6 +133,130 @@ export interface RuntimeTransport {
   getBytes(url: string): Promise<Uint8Array>;
 }
 
+/**
+ * A display-only card catalog. `id` is always the YgoMaster runtime ID; the
+ * YDK/passcode bridge and the original language records are retained for
+ * inspection, while generated search tags live separately in `autoTags`.
+ */
+export interface CatalogSourceRecord {
+  id: number;
+  name?: string;
+  desc?: string;
+  type?: number;
+  attribute?: number;
+  race?: number;
+  level?: number;
+  rank?: number;
+  link?: number;
+  scale?: number;
+  atk?: number;
+  def?: number;
+  [key: string]: JsonValue | undefined;
+}
+
+export interface CatalogCard {
+  /** YgoMaster's ID, never the external/YDK ID. */
+  id: number;
+  ydkId: number;
+  names: {
+    korean?: string;
+    english?: string;
+    display: string;
+  };
+  texts: {
+    korean?: string;
+    english?: string;
+    display?: string;
+  };
+  /** Original display source records; never mixed with generated tags. */
+  original: {
+    korean?: CatalogSourceRecord;
+    english?: CatalogSourceRecord;
+  };
+  stats: {
+    type?: number;
+    attribute?: number;
+    race?: number;
+    level?: number;
+    rank?: number;
+    link?: number;
+    scale?: number;
+    atk?: number;
+    def?: number;
+  };
+  /** Deterministic tags generated from type/stats/text. */
+  autoTags: string[];
+  /** Availability/rarity value copied from YgoMaster CardList.json. */
+  availability?: number;
+}
+
+export interface CatalogSourceDefinition {
+  id: 'korean' | 'english' | string;
+  language: 'korean' | 'english';
+  url: string;
+  /** JSON is useful for fixtures; sqlite is the normal cards.cdb format. */
+  format?: 'sqlite' | 'json';
+  revision?: string;
+}
+
+export interface CatalogTransport {
+  getBytes(url: string): Promise<Uint8Array>;
+  getText?(url: string): Promise<string>;
+  /** Optional response metadata such as ETag or Last-Modified. */
+  getBytesWithMetadata?(url: string): Promise<{ bytes: Uint8Array; revision?: string }>;
+}
+
+export interface CatalogCacheMetadata {
+  schemaVersion: 1;
+  generatedAt: string;
+  cardCount: number;
+  matchedRuntimeIdCount: number;
+  missingRuntimeIds: number[];
+  sources: Array<{
+    id: string;
+    language: 'korean' | 'english';
+    url: string;
+    format: 'sqlite' | 'json';
+    path: string;
+    usedFrom: 'local' | 'download';
+    revision?: string;
+    fetchedAt: string;
+    recordCount: number;
+  }>;
+  ygoMaster: {
+    runtimeTag?: string;
+    cardListPath?: string;
+    ydkIdsPath?: string;
+    runtimeIdCount: number;
+    bridgeCount: number;
+  };
+}
+
+export interface CatalogStatus {
+  cacheRoot: string;
+  catalogPath: string;
+  metadataPath: string;
+  sourcePaths: Partial<Record<'korean' | 'english', string>>;
+  valid: boolean;
+  metadata?: CatalogCacheMetadata;
+  cardCount: number;
+  missingRuntimeIdCount: number;
+  lastUpdated?: string;
+}
+
+export interface CatalogRefreshResult {
+  status: CatalogStatus;
+  cacheHit: boolean;
+  sourceUsage: Partial<Record<'korean' | 'english', 'local' | 'download'>>;
+  cards: CatalogCard[];
+}
+
+export interface CatalogSearchResult {
+  query: string;
+  total: number;
+  cards: CatalogCard[];
+}
+
 export interface RuntimeEnsureResult {
   entry: RuntimeCacheEntry;
   cacheHit: boolean;
