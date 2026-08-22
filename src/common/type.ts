@@ -345,6 +345,26 @@ export interface DeleteStructureDeckRequest {
   filesPath?: string;
 }
 
+/** Core-backed campaign deck document authoring. The path is relative to the
+ * manifest's deck directory; the core enforces containment and trash policy.
+ */
+export interface DeckPathRequest {
+  path: string;
+}
+
+export interface DeckWriteRequest extends DeckPathRequest {
+  value: unknown;
+}
+
+export interface DeckListResponse {
+  paths: string[];
+}
+
+export interface DeckReadResponse {
+  path: string;
+  value: unknown;
+}
+
 export interface ImportDeckRequest {
   dataPath: string;
   filesPath?: string;
@@ -353,4 +373,29 @@ export interface ImportDeckRequest {
 export interface ExportDeckRequest {
   dataPath: string;
   filesPath?: string;
+}
+
+export interface CoreOperationProblem {
+  code: string;
+  message: string;
+  path?: string;
+  severity?: 'error' | 'warning';
+}
+
+export interface CoreOperationResult<T = unknown> {
+  ok: boolean;
+  exitCode: number;
+  exitName: string;
+  warnings: CoreOperationProblem[];
+  problems: CoreOperationProblem[];
+  data?: T;
+}
+
+export interface CorePathsRequest {
+  sourceRoot?: string;
+  gameRoot?: string;
+}
+
+export interface CorePathRequest {
+  path: string;
 }

@@ -73,9 +73,8 @@ export const StructureDeckDetailView = ({
   const classes = useStyles();
 
   const defaultValuesForCreation = useMemo(() => {
-    // STdecks ID should start from 1120001 and some of ids are pre-occupied by system STdecks.
-    // We use IDs started from 1121001 for safety.
-    const id = Math.max(...structureDecks.map(({ id }) => id), 1121000) + 1;
+    // Campaign structure decks use the additive 1129000-1129999 range.
+    const id = Math.max(...structureDecks.map(({ id }) => id), 1129000) + 1;
 
     return { ...defaultStructureDeck, id };
   }, [structureDecks]);
@@ -122,8 +121,12 @@ export const StructureDeckDetailView = ({
             integer
             rules={{
               min: {
-                value: 1121001,
-                message: 'id should be larger than 1121000',
+                value: 1129000,
+                message: 'id should be between 1129000 and 1129999',
+              },
+              max: {
+                value: 1129999,
+                message: 'id should be between 1129000 and 1129999',
               },
               validate: {
                 unique: (inputId: number) =>

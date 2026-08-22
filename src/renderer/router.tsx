@@ -1,6 +1,7 @@
 import { createHashRouter, redirect } from 'react-router-dom';
 
 import { RootErrorBoundary } from './components/error/RootErrorBoundary';
+import { DeckList } from './components/deck/DeckList';
 import { GateCreate } from './components/gate/GateCreate';
 import { GateDetail } from './components/gate/GateDetail';
 import { GateList } from './components/gate/GateList';
@@ -32,6 +33,10 @@ export const router = createHashRouter([
       {
         path: 'gates/:id',
         element: <GateDetail />,
+      },
+      {
+        path: 'decks',
+        element: <DeckList />,
       },
       {
         path: 'structure-decks',

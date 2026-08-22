@@ -90,3 +90,8 @@ typings/
 
 # Electron-Forge
 out/
+
+# Modern CLI/release outputs and machine-local configuration
+dist-cli/
+release/
+.local/

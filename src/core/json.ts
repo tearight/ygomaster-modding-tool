@@ -1,0 +1,164 @@
+import * as fs from 'node:fs/promises';
+
+import { JsonObject, JsonValue, PayloadSource } from './types';
+
+const isObject = (value: unknown): value is JsonObject =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+export const cloneJson = <T>(value: T): T =>
+  JSON.parse(JSON.stringify(value)) as T;
+
+/** Parse the JSONC accepted by YgoMaster without adding a parser dependency. */
+export const stripJsonComments = (text: string): string => {
+  let output = '';
+  let inString = false;
+  let escaped = false;
+  let lineComment = false;
+  let blockComment = false;
+
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const next = text[index + 1];
+
+    if (lineComment) {
+      if (char === '\n' || char === '\r') {
+        lineComment = false;
+        output += char;
+      } else {
+        output += ' ';
+      }
+      continue;
+    }
+
+    if (blockComment) {
+      if (char === '*' && next === '/') {
+        blockComment = false;
+        output += '  ';
+        index += 1;
+      } else {
+        output += char === '\n' || char === '\r' ? char : ' ';
+      }
+      continue;
+    }
+
+    if (inString) {
+      output += char;
+      if (escaped) escaped = false;
+      else if (char === '\\') escaped = true;
+      else if (char === '"') inString = false;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = true;
+      output += char;
+    } else if (char === '/' && next === '/') {
+      lineComment = true;
+      output += '  ';
+      index += 1;
+    } else if (char === '/' && next === '*') {
+      blockComment = true;
+      output += '  ';
+      index += 1;
+    } else {
+      output += char;
+    }
+  }
+
+  return output;
+};
+
+export const parseJsonc = <T = JsonValue>(text: string): T =>
+  JSON.parse(stripJsonComments(text)) as T;
+
+export const readJsonc = async <T = JsonValue>(filePath: string): Promise<T> =>
+  parseJsonc<T>(await fs.readFile(filePath, 'utf8'));
+
+export const writeJson = async (
+  filePath: string,
+  value: unknown,
+  pretty = true,
+): Promise<void> => {
+  await fs.writeFile(
+    filePath,
+    `${pretty ? JSON.stringify(value, null, 2) : JSON.stringify(value)}\n`,
+    'utf8',
+  );
+};
+
+const findPayload = (value: unknown, payloadKey: string): JsonObject | undefined => {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findPayload(item, payloadKey);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  if (!isObject(value)) return undefined;
+  if (isObject(value[payloadKey])) return value[payloadKey];
+  for (const child of Object.values(value)) {
+    const found = findPayload(child, payloadKey);
+    if (found) return found;
+  }
+  return undefined;
+};
+
+const replacePayload = (
+  value: unknown,
+  payloadKey: string,
+  payload: JsonObject,
+): boolean => {
+  if (Array.isArray(value)) return value.some((item) => replacePayload(item, payloadKey, payload));
+  if (!isObject(value)) return false;
+  if (isObject(value[payloadKey])) {
+    value[payloadKey] = payload;
+    return true;
+  }
+  return Object.values(value).some((child) => replacePayload(child, payloadKey, payload));
+};
+
+export const unwrapPayload = <T extends JsonObject>(
+  document: unknown,
+  payloadKey: string,
+): PayloadSource<T> => {
+  if (!isObject(document)) throw new Error(`Expected a JSON object containing ${payloadKey}`);
+  if (isObject(document[payloadKey])) {
+    return {
+      document: cloneJson(document),
+      payloadKey,
+      payload: document[payloadKey] as T,
+      shape: 'raw',
+    };
+  }
+  const payload = findPayload(document, payloadKey);
+  if (!payload) throw new Error(`Could not find ${payloadKey} in the JSON document`);
+  return { document: cloneJson(document), payloadKey, payload: payload as T, shape: 'wrapped' };
+};
+
+const merge = (original: unknown, generated: unknown): unknown => {
+  if (Array.isArray(generated)) return cloneJson(generated);
+  if (!isObject(generated)) return generated;
+  const result: JsonObject = isObject(original) ? cloneJson(original) : {};
+  for (const [key, value] of Object.entries(generated)) result[key] = merge(result[key], value) as JsonValue;
+  return result;
+};
+
+export const mergeJsonObjects = <T extends JsonObject>(original: unknown, generated: T): T =>
+  merge(original, generated) as T;
+
+export const serializePayload = (
+  rootPayload: JsonObject,
+  source?: PayloadSource,
+): JsonObject => {
+  if (!source) return cloneJson(rootPayload);
+  const payload = rootPayload[source.payloadKey];
+  if (!isObject(payload)) throw new Error(`Missing ${source.payloadKey} in generated JSON`);
+  if (source.shape === 'raw') return mergeJsonObjects(source.document, rootPayload);
+  const document = cloneJson(source.document);
+  if (!replacePayload(document, source.payloadKey, payload)) {
+    throw new Error(`Could not replace ${source.payloadKey} in the source JSON`);
+  }
+  return document;
+};
+
+export { isObject };

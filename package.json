@@ -1,7 +1,7 @@
 {
   "name": "ygomaster-modding-tool",
   "productName": "ygomaster-modding-tool",
-  "version": "0.12.2",
+  "version": "0.13.0",
   "description": "YgoMaster LE mod modding tool",
   "main": ".vite/build/main.js",
   "scripts": {
@@ -10,6 +10,12 @@
     "make": "electron-forge make",
     "publish": "electron-forge publish",
     "test:compatibility": "node --test --require ts-node/register test/compatibility.test.ts",
+    "test": "npm run test:compatibility && node --test --require ts-node/register test/core.test.ts test/cli.test.ts",
+    "build:cli": "tsc -p tsconfig.cli.json",
+    "build:release": "node scripts/build-release.mjs",
+    "smoke:release": "node scripts/smoke-release.mjs",
+    "smoke:deploy": "node scripts/smoke-deploy.mjs",
+    "smoke:app": "node scripts/smoke-app.mjs",
     "lint": "eslint --ext .ts,.tsx .",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",

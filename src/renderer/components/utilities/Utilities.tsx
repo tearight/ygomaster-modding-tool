@@ -7,227 +7,179 @@ import {
   CardHeader,
   Field,
   Title1,
-  Toaster,
   makeStyles,
   tokens,
 } from '@fluentui/react-components';
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
-import { useToast } from '../../hooks/useToast';
 import { useAppStore } from '../../store';
 import { FileInput } from '../input/FileInput';
 
 const useStyles = makeStyles({
-  container: {
-    height: '100vh',
-    overflowY: 'auto',
-    padding: tokens.spacingHorizontalL,
-  },
-  header: {
-    display: 'flex',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
-  },
-  title: {
-    marginBottom: tokens.spacingVerticalL,
-  },
-  card: {
-    marginBottom: tokens.spacingVerticalL,
-  },
-  cardTitle: {
-    fontWeight: 700,
-  },
-  cardDescription: {
-    display: 'flex',
-    flexDirection: 'column',
-  },
+  container: { height: '100vh', overflowY: 'auto', padding: tokens.spacingHorizontalL },
+  title: { marginBottom: tokens.spacingVerticalL },
+  card: { marginBottom: tokens.spacingVerticalL },
+  row: { display: 'flex', flexWrap: 'wrap', gap: tokens.spacingHorizontalS },
+  deploymentList: { display: 'flex', flexDirection: 'column', gap: tokens.spacingVerticalS, padding: 0 },
+  deploymentRow: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: tokens.spacingHorizontalS },
+  deploymentPath: { flex: '1 1 420px', textAlign: 'left', whiteSpace: 'normal', overflowWrap: 'anywhere' },
+  output: { whiteSpace: 'pre-wrap', overflow: 'auto', maxHeight: '240px', padding: tokens.spacingHorizontalS },
 });
+
+interface CoreResultLike {
+  ok: boolean;
+  warnings?: unknown[];
+  problems?: unknown[];
+  data?: unknown;
+}
+
+const displayResult = (value: CoreResultLike | undefined) =>
+  value ? JSON.stringify(value, null, 2) : 'No operation run yet.';
+
+interface DeploymentEntry {
+  path: string;
+  metadata?: {
+    campaign?: { name?: string; version?: string };
+    deployedAt?: string;
+  };
+}
+
+const deploymentEntries = (value: CoreResultLike | undefined): DeploymentEntry[] => {
+  if (!Array.isArray(value?.data)) return [];
+  return value.data.filter((entry): entry is DeploymentEntry => {
+    if (!entry || typeof entry !== 'object') return false;
+    return typeof (entry as { path?: unknown }).path === 'string';
+  });
+};
 
 export const Utilities = () => {
   const classes = useStyles();
+  const paths = useAppStore((state) => state.paths);
+  const [sourceRoot, setSourceRoot] = useState('');
+  const [gameRoot, setGameRoot] = useState('');
+  const [lastResult, setLastResult] = useState<CoreResultLike>();
+  const [deployments, setDeployments] = useState<CoreResultLike>();
+  const [selectedDeployment, setSelectedDeployment] = useState<string>();
+  const [deploymentAction, setDeploymentAction] = useState<CoreResultLike>();
+  const [loading, setLoading] = useState(false);
+
+  const run = useCallback(async (operation: () => Promise<CoreResultLike>) => {
+    setLoading(true);
+    try {
+      const value = await operation();
+      setLastResult(value);
+      return value;
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const loadConfig = useCallback(async () => {
+    const value = await window.electron.configShow();
+    const config = (value.data as { config?: { sourceRoot?: string; gameRoot?: string } } | undefined)?.config;
+    if (config?.sourceRoot) setSourceRoot(config.sourceRoot);
+    if (config?.gameRoot) setGameRoot(config.gameRoot);
+  }, []);
+
+  const refreshDeployments = useCallback(async () => {
+    const value = await run(() => window.electron.deploymentList({ gameRoot }));
+    setDeployments(value);
+    const entries = deploymentEntries(value);
+    setSelectedDeployment((current) =>
+      current && entries.some((entry) => entry.path === current) ? current : entries[0]?.path,
+    );
+    setDeploymentAction(undefined);
+  }, [gameRoot, run]);
+
+  const inspectDeployment = useCallback(async (deploymentPath: string) => {
+    setSelectedDeployment(deploymentPath);
+    const value = await run(() => window.electron.deploymentInspect({ path: deploymentPath }));
+    setDeploymentAction(value);
+  }, [run]);
+
+  const launchSelectedDeployment = useCallback(async () => {
+    if (!selectedDeployment) return;
+    const value = await run(() => window.electron.deploymentLaunch({ path: selectedDeployment }));
+    setDeploymentAction(value);
+  }, [run, selectedDeployment]);
+
+  useEffect(() => {
+    void loadConfig();
+  }, [loadConfig]);
 
   return (
     <div className={classes.container}>
-      <div className={classes.header}>
-        <Title1 className={classes.title}>Utilities</Title1>
-      </div>
-      <DataSyncUtility />
-      <DeckSyncUtility />
+      <Title1 className={classes.title}>Campaign</Title1>
+      <Card className={classes.card}>
+        <CardHeader
+          header={<Body1>Workspace</Body1>}
+          description={<Caption1>Configure source/game roots, initialize the source tree, and validate additive overlays.</Caption1>}
+        />
+        <Field label="Source root">
+          <FileInput value={sourceRoot} onChange={setSourceRoot} directory placeholder="Select campaign/source" />
+        </Field>
+        <Field label="Game root">
+          <FileInput value={gameRoot} onChange={setGameRoot} directory placeholder="Select a game root" />
+        </Field>
+        <CardFooter className={classes.row}>
+          <Button disabled={loading} onClick={() => run(() => window.electron.configSetSourceRoot({ path: sourceRoot }))}>Save source root</Button>
+          <Button disabled={loading} onClick={() => run(() => window.electron.configSetGameRoot({ path: gameRoot }))}>Save game root</Button>
+          <Button disabled={loading} onClick={() => run(() => window.electron.workspaceInit({ sourceRoot }))}>Workspace init</Button>
+          <Button disabled={loading} onClick={() => run(() => window.electron.workspaceInspect({ sourceRoot }))}>Inspect</Button>
+          <Button appearance="primary" disabled={loading} onClick={() => run(() => window.electron.campaignValidate({ sourceRoot }))}>Validate</Button>
+        </CardFooter>
+      </Card>
+
+      <Card className={classes.card}>
+        <CardHeader
+          header={<Body1>Runtime and deployment</Body1>}
+          description={<Caption1>Fetch the latest official runtime, deploy a new sibling folder, and launch only an inspected deployment.</Caption1>}
+        />
+        <CardFooter className={classes.row}>
+          <Button disabled={loading} onClick={() => run(() => window.electron.runtimeStatus())}>Runtime status</Button>
+          <Button disabled={loading} onClick={() => run(() => window.electron.runtimeFetch())}>Fetch latest runtime</Button>
+          <Button appearance="primary" disabled={loading || !gameRoot} onClick={() => run(() => window.electron.campaignDeploy({ sourceRoot, gameRoot }))}>Deploy</Button>
+          <Button disabled={loading || !gameRoot} onClick={() => void refreshDeployments()}>Refresh deployments</Button>
+        </CardFooter>
+        {deployments && (
+          <>
+            <ul className={classes.deploymentList}>
+              {deploymentEntries(deployments).map((deployment) => (
+                <li key={deployment.path} className={classes.deploymentRow}>
+                  <Button
+                    className={classes.deploymentPath}
+                    appearance={deployment.path === selectedDeployment ? 'primary' : 'subtle'}
+                    disabled={loading}
+                    onClick={() => setSelectedDeployment(deployment.path)}
+                  >
+                    {deployment.path}
+                  </Button>
+                  <Button disabled={loading} onClick={() => void inspectDeployment(deployment.path)}>Inspect</Button>
+                </li>
+              ))}
+            </ul>
+            {!deploymentEntries(deployments).length && <Caption1>No inspected deployments found.</Caption1>}
+            <CardFooter className={classes.row}>
+              <Button
+                appearance="primary"
+                disabled={loading || !selectedDeployment}
+                onClick={() => void launchSelectedDeployment()}
+              >
+                Launch selected deployment
+              </Button>
+              {selectedDeployment && <Caption1>{selectedDeployment}</Caption1>}
+            </CardFooter>
+            {deploymentAction && <pre className={classes.output}>{displayResult(deploymentAction)}</pre>}
+            <pre className={classes.output}>{displayResult(deployments)}</pre>
+          </>
+        )}
+      </Card>
+
+      <Card className={classes.card}>
+        <CardHeader header={<Body1>Result</Body1>} description={<Caption1>CLI and UI operations return the same structured result contract.</Caption1>} />
+        <pre className={classes.output}>{displayResult(lastResult)}</pre>
+      </Card>
+      <Caption1>Authoring path: {paths.gatePath || 'not initialized'}</Caption1>
     </div>
-  );
-};
-
-interface UtilityDirectoryInputProps {
-  label: string;
-  value?: string;
-  onChange: (value: string) => void;
-}
-
-const UtilityDirectoryInput = ({
-  label,
-  value,
-  onChange,
-}: UtilityDirectoryInputProps) => {
-  return (
-    <Field label={label}>
-      <FileInput
-        value={value || ''}
-        onChange={onChange}
-        placeholder="Select a directory"
-        directory
-      />
-    </Field>
-  );
-};
-
-const DataSyncUtility = () => {
-  const classes = useStyles();
-  const settings = useAppStore((s) => s.settings);
-  const loadGates = useAppStore((s) => s.loadGates);
-  const { toasterId, withToast } = useToast(
-    'Success Data Sync',
-    'Fail Data Sync',
-  );
-
-  const [loading, setLoading] = useState(false);
-  const [dataPath, setDataPath] = useState(settings.dataPath);
-  const [filesPath, setFilesPath] = useState(settings.filesPath);
-
-  return (
-    <Card className={classes.card}>
-      <CardHeader
-        header={<Body1 className={classes.cardTitle}>Data Sync</Body1>}
-        description={
-          <div className={classes.cardDescription}>
-            <Caption1>Sync between YgoMaster Data and Tool files</Caption1>
-            <Caption1>
-              {
-                'When creating data from files, the IDs of the chapters in the gate file are combined with the ID of the gate. (e.g. { chapterId: 1, gateId: 1 } => { chapterId: 10001 })'
-              }
-            </Caption1>
-            <Caption1>
-              {
-                'When creating files from data, the same rule applies but in reverse. (e.g. { chapterId: 10001 } => { chapterId: 1, gateId: 1 })'
-              }
-            </Caption1>
-          </div>
-        }
-      />
-      <UtilityDirectoryInput
-        label="Data Path"
-        value={dataPath}
-        onChange={setDataPath}
-      />
-      <UtilityDirectoryInput
-        label="Files Path"
-        value={filesPath}
-        onChange={setFilesPath}
-      />
-      <Toaster toasterId={toasterId} />
-      <CardFooter>
-        <Button
-          appearance="primary"
-          onClick={async () => {
-            setLoading(true);
-            await withToast(() =>
-              window.electron.importData({
-                filesPath,
-                dataPath,
-              }),
-            );
-            await loadGates();
-            setLoading(false);
-          }}
-          disabled={loading}
-        >
-          {'Import (Data -> Files)'}
-        </Button>
-        <Button
-          appearance="primary"
-          onClick={async () => {
-            setLoading(true);
-            await withToast(() =>
-              window.electron.exportData({
-                filesPath,
-                dataPath,
-              }),
-            );
-            setLoading(false);
-          }}
-          disabled={loading}
-        >
-          {'Export (Files -> Data)'}
-        </Button>
-      </CardFooter>
-    </Card>
-  );
-};
-
-const DeckSyncUtility = () => {
-  const classes = useStyles();
-  const settings = useAppStore((s) => s.settings);
-  const { toasterId, withToast } = useToast(
-    'Success Deck Sync',
-    'Fail Deck Sync',
-  );
-
-  const [loading, setLoading] = useState(false);
-  const [dataPath, setDataPath] = useState(settings.dataPath);
-  const [filesPath, setFilesPath] = useState(settings.filesPath);
-
-  return (
-    <Card className={classes.card}>
-      <CardHeader
-        header={<Body1 className={classes.cardTitle}>Deck Sync</Body1>}
-        description={
-          <Caption1>Sync between YgoMaster Data and Deck files</Caption1>
-        }
-      />
-      <UtilityDirectoryInput
-        label="Data Path"
-        value={dataPath}
-        onChange={setDataPath}
-      />
-      <UtilityDirectoryInput
-        label="Files Path"
-        value={filesPath}
-        onChange={setFilesPath}
-      />
-      <Toaster toasterId={toasterId} />
-      <CardFooter>
-        <Button
-          appearance="primary"
-          onClick={async () => {
-            setLoading(true);
-            await withToast(() =>
-              window.electron.importDeck({
-                filesPath,
-                dataPath,
-              }),
-            );
-            setLoading(false);
-          }}
-          disabled={loading}
-        >
-          {'Import (Data -> Deck)'}
-        </Button>
-        <Button
-          appearance="primary"
-          onClick={async () => {
-            setLoading(true);
-            await withToast(() =>
-              window.electron.exportDeck({
-                filesPath,
-                dataPath,
-              }),
-            );
-            setLoading(false);
-          }}
-          disabled={loading}
-        >
-          {'Export (Deck -> Data)'}
-        </Button>
-      </CardFooter>
-    </Card>
   );
 };

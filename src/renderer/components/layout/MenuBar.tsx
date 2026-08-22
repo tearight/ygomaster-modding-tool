@@ -44,6 +44,14 @@ export const MenuBar = () => {
           aria-label="Gates"
         />
       </Tooltip>
+      <Tooltip content="Decks" relationship="label" positioning="after">
+        <Tab
+          className={classes.item}
+          icon={<LayerRegular />}
+          value="decks"
+          aria-label="Decks"
+        />
+      </Tooltip>
       <Tooltip
         content="Structure Decks"
         relationship="label"

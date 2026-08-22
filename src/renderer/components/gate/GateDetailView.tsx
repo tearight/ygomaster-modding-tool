@@ -188,9 +188,8 @@ export const GateDetailView = ({
   const classes = useStyles();
 
   const defaultValuesForCreation = useMemo(() => {
-    // Gate IDs should be larger than default MD's gates not to use default background images.
-    // TODO Lower this min to be just above tutorial gates (ex. 3) when there is background setting feature.
-    const id = Math.max(...gates.map(({ id }) => id), 100) + 1;
+    // Campaign gates use the additive 90000-90999 range.
+    const id = Math.max(...gates.map(({ id }) => id), 90000) + 1;
     const priority = Math.max(...gates.map(({ priority }) => priority), 0) + 1;
     const clear_chapter = { gateId: id, chapterId: 0 };
 
@@ -262,7 +261,8 @@ export const GateDetailView = ({
             number
             integer
             rules={{
-              min: { value: 101, message: 'id should be larger than 100' },
+              min: { value: 90000, message: 'id should be between 90000 and 90999' },
+              max: { value: 90999, message: 'id should be between 90000 and 90999' },
               validate: {
                 unique: (inputId: number) =>
                   gates.every(({ id }) => id !== inputId || id === initialId) ||
