@@ -63,10 +63,23 @@ describe('custom card database', () => {
         },
       },
     });
+    await writeJson(path.join(databaseRoot, 'layers', 'generated', '1002.json'), {
+      schemaVersion: 1,
+      cardId: 1002,
+      revision: 1,
+      searchTerms: ['discarded-analysis'],
+    });
+    await writeJson(path.join(databaseRoot, 'layers', 'reviewed', '1002.json'), {
+      schemaVersion: 1,
+      cardId: 1002,
+      revision: 2,
+      operation: 'tombstone',
+    });
 
-    const validated = await validateCustomCardDatabase(root, sourceRoot, new Set([1001]));
+    const validated = await validateCustomCardDatabase(root, sourceRoot, new Set([1001, 1002]));
     assert.equal(validated.ok, true);
-    assert.equal(validated.data?.sourceRecordCount, 2);
+    assert.equal(validated.data?.sourceRecordCount, 4);
+    assert.equal(validated.data?.materializedCards.length, 1);
     const card = validated.data?.materializedCards[0];
     assert.deepEqual(card?.searchTerms, ['engine', 'reviewed']);
     assert.deepEqual(card?.facets.role, ['boss']);
@@ -109,6 +122,8 @@ describe('custom card database', () => {
     assert.equal(migrated.record?.cardId, 1001);
     assert.deepEqual(migrated.record?.extensions, { 'org.ygomastersolo.legacy/v1': { nested: { value: 1 } } });
     assert.deepEqual(legacy.custom, { nested: { value: 1 } });
+    const reloaded = migrateCustomCardRecord(JSON.parse(JSON.stringify(migrated.record)) as unknown);
+    assert.deepEqual(reloaded.record, migrated.record);
+    assert.equal(migrateCustomCardRecord({ schemaVersion: 2, cardId: 1001, revision: 1 }).problem?.code, 'CUSTOM_CARD_SCHEMA_UNSUPPORTED');
   });
 });
-
