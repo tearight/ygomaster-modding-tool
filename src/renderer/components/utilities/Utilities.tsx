@@ -11,6 +11,7 @@ import {
   tokens,
 } from '@fluentui/react-components';
 import { useCallback, useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 
 import { useAppStore } from '../../store';
 import { FileInput } from '../input/FileInput';
@@ -54,6 +55,7 @@ const deploymentEntries = (value: CoreResultLike | undefined): DeploymentEntry[]
 
 export const Utilities = () => {
   const classes = useStyles();
+  const navigate = useNavigate();
   const paths = useAppStore((state) => state.paths);
   const [sourceRoot, setSourceRoot] = useState('');
   const [gameRoot, setGameRoot] = useState('');
@@ -122,6 +124,7 @@ export const Utilities = () => {
           <FileInput value={gameRoot} onChange={setGameRoot} directory placeholder="Select a game root" />
         </Field>
         <CardFooter className={classes.row}>
+          <Button disabled={loading} onClick={() => navigate('/content')}>Content pipeline</Button>
           <Button disabled={loading} onClick={() => run(() => window.electron.configSetSourceRoot({ path: sourceRoot }))}>Save source root</Button>
           <Button disabled={loading} onClick={() => run(() => window.electron.configSetGameRoot({ path: gameRoot }))}>Save game root</Button>
           <Button disabled={loading} onClick={() => run(() => window.electron.workspaceInit({ sourceRoot }))}>Workspace init</Button>

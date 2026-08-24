@@ -34,6 +34,13 @@ import {
   UPDATE_STRUCTURE_DECK,
   CAMPAIGN_DEPLOY,
   CAMPAIGN_VALIDATE,
+  CONTENT_COMPILE,
+  CONTENT_DEPLOY,
+  CONTENT_DIFF,
+  CONTENT_INSPECT,
+  CONTENT_RESOLVE,
+  CONTENT_REVEAL_SOURCE,
+  CONTENT_VALIDATE,
   CATALOG_REFRESH,
   CATALOG_SEARCH,
   CATALOG_STATUS,
@@ -58,6 +65,11 @@ import {
   DeckWriteRequest,
   CreateStructureDeckRequest,
   CreateStructureDeckResponse,
+  ContentCompileRequest,
+  ContentDeployRequest,
+  ContentOperationRequest,
+  ContentPathsRequest,
+  ContentRevealSourceRequest,
   DeleteGateRequest,
   DeleteStructureDeckRequest,
   Gate,
@@ -78,6 +90,10 @@ import {
 import {
   CONTRACT_VERSION,
   TOOL_VERSION,
+  IR_COMPILER_VERSION,
+  YGOMASTER_TARGET_CONTRACT_VERSION,
+  createEmptyRegistry,
+  discoverContentSnapshot,
   deleteDocument,
   deployCampaign,
   catalogSearch,
@@ -90,8 +106,10 @@ import {
   launchDeployment,
   listDeployments,
   listDocuments,
+  loadCardResolver,
   loadManifest,
   readConfig,
+  readRegistry,
   readDocument,
   runtimeFetch,
   runtimeStatus,
@@ -99,6 +117,14 @@ import {
   resolveProjectRoot,
   updateConfig,
   validateCampaign,
+  compileCampaignContentOperation,
+  diffCampaignContent,
+  exists,
+  inspectCampaignContent,
+  resolveCampaignContent,
+  validateCampaignContentOperation,
+  failure,
+  problem,
   writeDocument,
 } from '../core';
 import type { CatalogRefreshRequest, CatalogSearchRequest, CoreOperationResult, CorePathRequest, CorePathsRequest } from '../common/type';
@@ -218,6 +244,22 @@ const requireCoreData = <T>(operation: CoreOperationResult<T>): T => {
   return operation.data;
 };
 
+const generatedIrWriteBlocked = <T = never>(): CoreOperationResult<T> => failure<T>([
+  problem(
+    'GENERATED_IR_READ_ONLY',
+    'Generated Gate/Deck/Structure IR is compiler-owned and cannot be edited through the UI; edit campaign content instead.',
+  ),
+], 'COMMAND_FAILED');
+
+const allowLegacyIrWrite = (request: { allowLegacyIrWrite?: boolean }): boolean => request.allowLegacyIrWrite === true;
+
+const contentOptions = (app: App, request: ContentPathsRequest = {}) => ({
+  projectRoot: getCoreProjectRoot(app),
+  ...(request.contentRoot ? { contentRoot: request.contentRoot } : {}),
+  ...(request.irRoot ? { irRoot: request.irRoot } : {}),
+  ...(request.registryPath ? { registryPath: request.registryPath } : {}),
+});
+
 const handleReadGates = (app: App) => async (): Promise<ReadGatesResponse> => {
   const projectRoot = getCoreProjectRoot(app);
   const sourceRoot = await coreSourceRoot(app);
@@ -235,13 +277,17 @@ const handleReadGate = (app: App) => async (_event: IpcMainInvokeEvent, { id }: 
   return { gate };
 };
 
-const handleCreateGate = (app: App) => async (_event: IpcMainInvokeEvent, { gate }: CreateGateRequest): Promise<CreateGateResponse> => {
+const handleCreateGate = (app: App) => async (_event: IpcMainInvokeEvent, request: CreateGateRequest): Promise<CreateGateResponse | CoreOperationResult> => {
+  if (!allowLegacyIrWrite(request)) return generatedIrWriteBlocked();
+  const { gate } = request;
   const projectRoot = getCoreProjectRoot(app);
   requireCoreData(await writeDocument(projectRoot, await coreSourceRoot(app), 'gate', `${gate.id}.json`, gate as never, false));
   return { gate };
 };
 
-const handleUpdateGate = (app: App) => async (_event: IpcMainInvokeEvent, { gate, prevId }: UpdateGateRequest): Promise<{ gate: Gate }> => {
+const handleUpdateGate = (app: App) => async (_event: IpcMainInvokeEvent, request: UpdateGateRequest): Promise<{ gate: Gate } | CoreOperationResult> => {
+  if (!allowLegacyIrWrite(request)) return generatedIrWriteBlocked();
+  const { gate, prevId } = request;
   const projectRoot = getCoreProjectRoot(app);
   const sourceRoot = await coreSourceRoot(app);
   if (prevId === gate.id) {
@@ -253,7 +299,9 @@ const handleUpdateGate = (app: App) => async (_event: IpcMainInvokeEvent, { gate
   return { gate };
 };
 
-const handleDeleteGate = (app: App) => async (_event: IpcMainInvokeEvent, { id }: DeleteGateRequest): Promise<void> => {
+const handleDeleteGate = (app: App) => async (_event: IpcMainInvokeEvent, request: DeleteGateRequest): Promise<void | CoreOperationResult> => {
+  if (!allowLegacyIrWrite(request)) return generatedIrWriteBlocked();
+  const { id } = request;
   requireCoreData(await deleteDocument(getCoreProjectRoot(app), await coreSourceRoot(app), 'gate', `${id}.json`));
 };
 
@@ -272,12 +320,16 @@ const handleReadStructureDeck = (app: App) => async (_event: IpcMainInvokeEvent,
   return { structureDeck };
 };
 
-const handleCreateStructureDeck = (app: App) => async (_event: IpcMainInvokeEvent, { structureDeck }: CreateStructureDeckRequest): Promise<CreateStructureDeckResponse> => {
+const handleCreateStructureDeck = (app: App) => async (_event: IpcMainInvokeEvent, request: CreateStructureDeckRequest): Promise<CreateStructureDeckResponse | CoreOperationResult> => {
+  if (!allowLegacyIrWrite(request)) return generatedIrWriteBlocked();
+  const { structureDeck } = request;
   requireCoreData(await writeDocument(getCoreProjectRoot(app), await coreSourceRoot(app), 'structure', `${structureDeck.id}.json`, structureDeck as never, false));
   return { structureDeck };
 };
 
-const handleUpdateStructureDeck = (app: App) => async (_event: IpcMainInvokeEvent, { structureDeck, prevId }: UpdateStructureDeckRequest): Promise<{ structureDeck: StructureDeck }> => {
+const handleUpdateStructureDeck = (app: App) => async (_event: IpcMainInvokeEvent, request: UpdateStructureDeckRequest): Promise<{ structureDeck: StructureDeck } | CoreOperationResult> => {
+  if (!allowLegacyIrWrite(request)) return generatedIrWriteBlocked();
+  const { structureDeck, prevId } = request;
   const projectRoot = getCoreProjectRoot(app);
   const sourceRoot = await coreSourceRoot(app);
   if (prevId === structureDeck.id) {
@@ -289,7 +341,9 @@ const handleUpdateStructureDeck = (app: App) => async (_event: IpcMainInvokeEven
   return { structureDeck };
 };
 
-const handleDeleteStructureDeck = (app: App) => async (_event: IpcMainInvokeEvent, { id }: DeleteStructureDeckRequest): Promise<void> => {
+const handleDeleteStructureDeck = (app: App) => async (_event: IpcMainInvokeEvent, request: DeleteStructureDeckRequest): Promise<void | CoreOperationResult> => {
+  if (!allowLegacyIrWrite(request)) return generatedIrWriteBlocked();
+  const { id } = request;
   requireCoreData(await deleteDocument(getCoreProjectRoot(app), await coreSourceRoot(app), 'structure', `${id}.json`));
 };
 
@@ -310,8 +364,10 @@ const handleReadDeck = (app: App) => async (
 
 const handleCreateDeck = (app: App) => async (
   _event: IpcMainInvokeEvent,
-  { path: relativePath, value }: DeckWriteRequest,
+  request: DeckWriteRequest,
 ): Promise<CoreOperationResult<{ path: string }>> => {
+  if (!allowLegacyIrWrite(request)) return generatedIrWriteBlocked<{ path: string }>();
+  const { path: relativePath, value } = request;
   const projectRoot = getCoreProjectRoot(app);
   const data = requireCoreData(await writeDocument(projectRoot, await coreSourceRoot(app), 'deck', relativePath, value as never, false));
   return result(data);
@@ -319,8 +375,10 @@ const handleCreateDeck = (app: App) => async (
 
 const handleUpdateDeck = (app: App) => async (
   _event: IpcMainInvokeEvent,
-  { path: relativePath, value }: DeckWriteRequest,
+  request: DeckWriteRequest,
 ): Promise<CoreOperationResult<{ path: string }>> => {
+  if (!allowLegacyIrWrite(request)) return generatedIrWriteBlocked<{ path: string }>();
+  const { path: relativePath, value } = request;
   const projectRoot = getCoreProjectRoot(app);
   const data = requireCoreData(await writeDocument(projectRoot, await coreSourceRoot(app), 'deck', relativePath, value as never, true));
   return result(data);
@@ -328,8 +386,10 @@ const handleUpdateDeck = (app: App) => async (
 
 const handleDeleteDeck = (app: App) => async (
   _event: IpcMainInvokeEvent,
-  { path: relativePath }: DeckPathRequest,
+  request: DeckPathRequest,
 ): Promise<CoreOperationResult<{ trashPath: string }>> => {
+  if (!allowLegacyIrWrite(request)) return generatedIrWriteBlocked<{ trashPath: string }>();
+  const { path: relativePath } = request;
   const data = requireCoreData(await deleteDocument(getCoreProjectRoot(app), await coreSourceRoot(app), 'deck', relativePath));
   return result(data);
 };
@@ -381,15 +441,108 @@ const handleCampaignValidate = (app: App) => async (
   request: CorePathsRequest = {},
 ) => validateCampaign(getCoreProjectRoot(app), request.sourceRoot);
 
+const handleContentInspect = (app: App) => async (
+  _event: IpcMainInvokeEvent,
+  request: ContentOperationRequest = {},
+) => inspectCampaignContent(contentOptions(app, request));
+
+const handleContentResolve = (app: App) => async (
+  _event: IpcMainInvokeEvent,
+  request: ContentOperationRequest = {},
+) => resolveCampaignContent(contentOptions(app, request));
+
+const handleContentValidate = (app: App) => async (
+  _event: IpcMainInvokeEvent,
+  request: ContentOperationRequest = {},
+) => validateCampaignContentOperation(contentOptions(app, request));
+
+const handleContentDiff = (app: App) => async (
+  _event: IpcMainInvokeEvent,
+  request: ContentOperationRequest = {},
+) => diffCampaignContent(contentOptions(app, request));
+
+const handleContentRevealSource = (app: App) => async (
+  _event: IpcMainInvokeEvent,
+  request: ContentRevealSourceRequest,
+) => {
+  const projectRoot = getCoreProjectRoot(app);
+  const contentRoot = path.resolve(request.contentRoot || path.join(projectRoot, 'campaign', 'content'));
+  if (!request.sourcePath || path.isAbsolute(request.sourcePath)) {
+    return failure([problem('CONTENT_SOURCE_PATH_INVALID', 'Authored source path must be relative to the content root')], 'PATH_ERROR');
+  }
+  const sourcePath = path.resolve(contentRoot, request.sourcePath);
+  const relative = path.relative(contentRoot, sourcePath);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    return failure([problem('CONTENT_SOURCE_PATH_ESCAPE', 'Authored source path escapes the content root', request.sourcePath)], 'PATH_ERROR');
+  }
+  shell.showItemInFolder(sourcePath);
+  return result({ path: sourcePath });
+};
+
+const handleContentCompile = (app: App) => async (
+  _event: IpcMainInvokeEvent,
+  request: ContentCompileRequest = {},
+) => {
+  if (request.apply === true && request.confirmApply !== true) {
+    return failure([
+      problem('CONTENT_APPLY_CONFIRMATION_REQUIRED', 'Applied content compile requires explicit UI confirmation.'),
+    ], 'USAGE_ERROR');
+  }
+  const { contentRoot, irRoot, registryPath } = request;
+  return compileCampaignContentOperation({
+    ...contentOptions(app, { contentRoot, irRoot, registryPath }),
+    apply: request.apply === true,
+    ...(request.expectedContentGeneration ? { expectedContentGeneration: request.expectedContentGeneration } : {}),
+  });
+};
+
+const managedDeploy = async (app: App, request: ContentDeployRequest = {}): Promise<CoreOperationResult> => {
+  const projectRoot = getCoreProjectRoot(app);
+  const config = await readConfig(projectRoot);
+  const gameRoot = request.gameRoot || config.gameRoot;
+  if (!gameRoot) return failure([problem('GAME_ROOT_REQUIRED', 'Configure a game root before managed campaign deploy')], 'PATH_ERROR');
+
+  const sourceRoot = path.resolve(request.sourceRoot || config.sourceRoot || path.join(projectRoot, 'campaign', 'source'));
+  const generationPath = path.join(sourceRoot, 'generation.json');
+  if (!(await exists(generationPath))) {
+    if (request.allowLegacyIr === true) return deployCampaign({ projectRoot, sourceRoot, gameRoot, logger: coreLogger });
+    return failure([
+      problem('IR_GENERATION_METADATA_MISSING', 'Managed UI deploy requires compiler generation metadata; legacy deploy must be explicitly enabled.', 'generation.json'),
+    ], 'COMMAND_FAILED');
+  }
+
+  const contentRoot = path.resolve(request.contentRoot || path.join(projectRoot, 'campaign', 'content'));
+  const registryPath = path.resolve(request.registryPath || path.join(projectRoot, 'campaign', 'id-registry.json'));
+  const snapshot = await discoverContentSnapshot(contentRoot, { projectRoot });
+  if (!snapshot.ok || !snapshot.snapshot) return failure(snapshot.problems, 'COMMAND_FAILED');
+  const resolver = await loadCardResolver(projectRoot);
+  const registry = await exists(registryPath) ? await readRegistry(registryPath) : createEmptyRegistry();
+  return deployCampaign({
+    projectRoot,
+    sourceRoot,
+    gameRoot,
+    logger: coreLogger,
+    requireGenerationMetadata: true,
+    expectedGeneration: {
+      contentGeneration: snapshot.snapshot.contentGeneration,
+      compilerVersion: IR_COMPILER_VERSION,
+      catalogGeneration: resolver.catalogGeneration,
+      idRegistryGeneration: registry.generation,
+      targetContractVersion: YGOMASTER_TARGET_CONTRACT_VERSION,
+    },
+  });
+};
+
+const handleContentDeploy = (app: App) => async (
+  _event: IpcMainInvokeEvent,
+  request: ContentDeployRequest = {},
+) => managedDeploy(app, request);
+
 const handleCampaignDeploy = (app: App) => async (
   _event: IpcMainInvokeEvent,
   request: CorePathsRequest = {},
 ) => {
-  const projectRoot = getCoreProjectRoot(app);
-  const config = await readConfig(projectRoot);
-  const gameRoot = request.gameRoot || config.gameRoot;
-  if (!gameRoot) throw new Error('Game root is not configured');
-  return deployCampaign({ projectRoot, sourceRoot: request.sourceRoot || config.sourceRoot, gameRoot, logger: coreLogger });
+  return managedDeploy(app, request);
 };
 
 const handleRuntimeStatus = (app: App) => async () => runtimeStatus(getCoreProjectRoot(app));
@@ -433,6 +586,18 @@ const handleWithLog: typeof ipcMain.handle = (chanel, handler) => {
   });
 };
 
+/** Injectable handler surface used by the renderer boundary tests. */
+export const createContentIpcHandlers = (app: App) => ({
+  [CONTENT_INSPECT]: handleContentInspect(app),
+  [CONTENT_RESOLVE]: handleContentResolve(app),
+  [CONTENT_VALIDATE]: handleContentValidate(app),
+  [CONTENT_COMPILE]: handleContentCompile(app),
+  [CONTENT_DIFF]: handleContentDiff(app),
+  [CONTENT_DEPLOY]: handleContentDeploy(app),
+  [CONTENT_REVEAL_SOURCE]: handleContentRevealSource(app),
+  [CREATE_DECK]: handleCreateDeck(app),
+});
+
 export const handleIpc = (app: App) => {
   handleWithLog(OPEN_DIRECTORY, handleOpenDirectory);
   handleWithLog(OPEN_FILE, handleOpenFile);
@@ -469,6 +634,13 @@ export const handleIpc = (app: App) => {
   handleWithLog(WORKSPACE_INSPECT, handleWorkspaceInspect(app));
   handleWithLog(CAMPAIGN_VALIDATE, handleCampaignValidate(app));
   handleWithLog(CAMPAIGN_DEPLOY, handleCampaignDeploy(app));
+  handleWithLog(CONTENT_INSPECT, handleContentInspect(app));
+  handleWithLog(CONTENT_RESOLVE, handleContentResolve(app));
+  handleWithLog(CONTENT_VALIDATE, handleContentValidate(app));
+  handleWithLog(CONTENT_COMPILE, handleContentCompile(app));
+  handleWithLog(CONTENT_DIFF, handleContentDiff(app));
+  handleWithLog(CONTENT_DEPLOY, handleContentDeploy(app));
+  handleWithLog(CONTENT_REVEAL_SOURCE, handleContentRevealSource(app));
   handleWithLog(RUNTIME_STATUS, handleRuntimeStatus(app));
   handleWithLog(RUNTIME_FETCH, handleRuntimeFetch(app));
   handleWithLog(CATALOG_STATUS, handleCatalogStatus(app));

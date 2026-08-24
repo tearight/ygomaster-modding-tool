@@ -1,7 +1,9 @@
 import path from 'node:path';
+import * as fs from 'node:fs/promises';
 
 import { assertRealPathInside, exists, listFiles, readJsonFile } from './fs';
 import { getWorkspacePaths, loadManifest, validateManifest } from './manifest';
+import { GATE_BACKGROUND_CODES, validateGateBackgroundPng } from './gate-background-assets';
 import { isForbiddenOverlay, unsupportedChapterPackFields } from './overlay';
 import {
   DocumentType,
@@ -303,9 +305,38 @@ export const validateCampaign = async (
 
     for (const file of overlayFiles) {
       const relative = path.relative(paths.overlayRoot, file).split(path.sep).join('/');
+      const lower = relative.toLowerCase();
+      if (lower === 'shop.json' || lower === 'shoppackodds.json') {
+        try {
+          const managed = asObject(await readJsonFile(file));
+          if (!managed) problems.push(problem('SHOP_OVERLAY_INVALID', 'Managed Shop overlay must be a JSON object', relative));
+          else if (lower === 'shop.json' && (!asObject(managed.PackShop) || Object.keys(managed).some((key) => key !== 'PackShop'))) {
+            problems.push(problem('SHOP_OVERLAY_INVALID', 'Shop.json IR must contain only PackShop', relative));
+          } else if (lower === 'shoppackodds.json' && (!Array.isArray(managed.entries) || Object.keys(managed).some((key) => key !== 'entries'))) {
+            problems.push(problem('SHOP_ODDS_OVERLAY_INVALID', 'ShopPackOdds.json IR must contain only entries', relative));
+          }
+        } catch (error) {
+          problems.push(problem('SHOP_OVERLAY_INVALID', String(error), relative));
+        }
+        continue;
+      }
       if (isForbiddenOverlay(relative)) {
         warnings.push(problem('OVERLAY_SCOPE_UNSUPPORTED', 'Shop/Settings/Regulation overlays are outside the public additive scope and will be skipped', relative, 'warning'));
       }
+    }
+
+    const overlayByRelative = new Map(overlayFiles.map((file) => [
+      path.relative(paths.overlayRoot, file).split(path.sep).join('/').toLowerCase(),
+      file,
+    ]));
+    for (const gateId of [...gateMap.keys()].sort((left, right) => left - right)) {
+      const relative = `ClientData/SoloGateBackgrounds/${gateId}.png`;
+      const file = overlayByRelative.get(relative.toLowerCase());
+      if (!file) {
+        problems.push(problem(GATE_BACKGROUND_CODES.MISSING, `Custom Solo Gate ${gateId} requires ${relative}`, relative));
+        continue;
+      }
+      problems.push(...validateGateBackgroundPng({ sourcePath: relative, bytes: new Uint8Array(await fs.readFile(file)) }));
     }
 
     const files = [...gateFiles, ...deckFiles, ...structureFiles, ...overlayFiles].map((file) => sourceRelative(sourceRoot, file)).sort();

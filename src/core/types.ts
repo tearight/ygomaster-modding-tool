@@ -22,6 +22,22 @@ export interface Problem {
   message: string;
   path?: string;
   severity?: 'error' | 'warning';
+  /** Optional source location fields used by content parsers. */
+  sourcePath?: string;
+  line?: number;
+  column?: number;
+  endLine?: number;
+  endColumn?: number;
+  end?: { line: number; column: number };
+  sourceSpan?: {
+    sourcePath?: string;
+    line: number;
+    column: number;
+    endLine: number;
+    endColumn: number;
+  };
+  jsonPointer?: string;
+  suggestion?: string;
 }
 
 export interface OperationResult<T = unknown> {
@@ -278,6 +294,13 @@ export interface DeploymentMetadata {
   };
   moddingToolVersion: string;
   contractVersion: number;
+  irGeneration?: {
+    contentGeneration: string;
+    compilerVersion: string;
+    catalogGeneration: string;
+    idRegistryGeneration: string;
+    targetContractVersion: string;
+  };
 }
 
 export interface DeploymentSummary {

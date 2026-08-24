@@ -37,3 +37,44 @@ English names are used when Korean is unavailable. A normal refresh parses
 valid local CDB files without downloading; `--online` explicitly updates both
 approved sources after successful parsing. Source CDB files are never bundled
 in a release.
+
+## Layered campaign CLI
+
+`campaign/content` is the only executable authored source. The CLI resolves
+English card names and symbolic references locally, then generates managed
+`campaign/source` IR. Read-only operations never update content, IR, or the ID
+registry:
+
+```text
+node cli/index.js content inspect
+node cli/index.js content resolve
+node cli/index.js content validate
+node cli/index.js content compile --check
+node cli/index.js content diff
+```
+
+Publishing is explicit and generation-guarded. Copy `contentGeneration` from
+`content inspect`, review the semantic diff, then run:
+
+```text
+node cli/index.js content compile --apply --expected-generation <sha256>
+```
+
+Managed deploys require matching content, compiler, catalog, ID-registry, and
+target-contract generations. `--allow-legacy-ir` exists only for an explicitly
+reviewed pre-migration source and is never implied by content commands.
+
+Existing active source is inventoried separately and is never auto-merged with
+`source-legacy`. Preview is read-only. Apply accepts only a reviewed candidate
+directory and both generations copied from that preview:
+
+```text
+node cli/index.js migration preview
+node cli/index.js migration preview --candidate <reviewed-content-directory>
+node cli/index.js migration apply --candidate <reviewed-content-directory> --accept --expected-source-generation <sha256> --expected-candidate-generation <sha256>
+```
+
+Apply atomically replaces the content directory and preserves the exact active
+source under the generation-addressed `.migration-backups/` workspace folder.
+An empty active skeleton is reported and blocked instead of being presented as
+a successful content migration.

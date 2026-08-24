@@ -4,6 +4,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 
 import { atomicWriteJson, copyDirectory, ensureDirectory, exists, readJsonFile, removeExact } from './fs';
+import { IR_GENERATION_METADATA_FILE, IRGenerationMetadata, YGOMASTER_TARGET_CONTRACT_VERSION, readIrGenerationMetadata } from './layers';
 import { loadManifest } from './manifest';
 import { applyCampaignOverlay } from './overlay';
 import { ensureRuntime, runtimeStatus } from './runtime';
@@ -37,10 +38,19 @@ const isDeploymentMetadata = (value: unknown): value is DeploymentMetadata => {
   const metadata = value as Record<string, unknown>;
   const campaign = metadata.campaign as Record<string, unknown> | undefined;
   const runtimeAsset = metadata.runtimeAsset as Record<string, unknown> | undefined;
+  const irGeneration = metadata.irGeneration as Record<string, unknown> | undefined;
+  const nonEmpty = (entry: unknown): entry is string => typeof entry === 'string' && entry.trim().length > 0;
+  const validIrGeneration = irGeneration === undefined || (
+    nonEmpty(irGeneration.contentGeneration)
+    && nonEmpty(irGeneration.compilerVersion)
+    && nonEmpty(irGeneration.catalogGeneration)
+    && nonEmpty(irGeneration.idRegistryGeneration)
+    && irGeneration.targetContractVersion === YGOMASTER_TARGET_CONTRACT_VERSION
+  );
   return !!campaign && typeof campaign.name === 'string' && typeof campaign.slug === 'string' && typeof campaign.version === 'string'
     && typeof metadata.deployedAt === 'string' && typeof metadata.resolvedRuntimeTag === 'string'
     && !!runtimeAsset && typeof runtimeAsset.name === 'string' && typeof runtimeAsset.url === 'string'
-    && typeof metadata.moddingToolVersion === 'string' && Number.isInteger(metadata.contractVersion);
+    && typeof metadata.moddingToolVersion === 'string' && Number.isInteger(metadata.contractVersion) && validIrGeneration;
 };
 
 export interface DeployOptions {
@@ -50,7 +60,57 @@ export interface DeployOptions {
   transport?: import('./types').RuntimeTransport;
   logger?: CoreLogger;
   toolVersion?: string;
+  /** Expected authored/service generations. Supplying this makes generation metadata mandatory. */
+  expectedGeneration?: ExpectedDeploymentGeneration;
+  requireGenerationMetadata?: boolean;
 }
+
+export interface ExpectedDeploymentGeneration {
+  contentGeneration: string;
+  compilerVersion?: string;
+  catalogGeneration?: string;
+  idRegistryGeneration?: string;
+  targetContractVersion?: string;
+}
+
+const generationValue = (metadata: IRGenerationMetadata): string =>
+  metadata.idRegistryGeneration || metadata.idLockGeneration || '';
+
+export const validateDeploymentGeneration = async (
+  sourceRoot: string,
+  expected?: ExpectedDeploymentGeneration,
+  required = Boolean(expected),
+): Promise<OperationResult<IRGenerationMetadata | undefined>> => {
+  const metadataPath = path.join(sourceRoot, IR_GENERATION_METADATA_FILE);
+  if (!(await exists(metadataPath))) {
+    if (!required) return result(undefined);
+    return failure([problem(
+      'IR_GENERATION_METADATA_MISSING',
+      `Managed IR generation metadata is required before deployment: ${metadataPath}`,
+      IR_GENERATION_METADATA_FILE,
+    )], 'COMMAND_FAILED');
+  }
+  try {
+    const metadata = await readIrGenerationMetadata(sourceRoot);
+    const mismatches: Problem[] = [];
+    const compare = (field: string, actual: string, wanted: string | undefined) => {
+      if (wanted !== undefined && actual !== wanted) mismatches.push(problem(
+        'IR_GENERATION_STALE',
+        `IR ${field} is stale: expected ${wanted}, received ${actual}`,
+        `${IR_GENERATION_METADATA_FILE}:${field}`,
+      ));
+    };
+    compare('contentGeneration', metadata.contentGeneration, expected?.contentGeneration);
+    compare('compilerVersion', metadata.compilerVersion, expected?.compilerVersion);
+    compare('catalogGeneration', metadata.catalogGeneration, expected?.catalogGeneration);
+    compare('idRegistryGeneration', generationValue(metadata), expected?.idRegistryGeneration);
+    compare('targetContractVersion', metadata.targetContractVersion, expected?.targetContractVersion);
+    if (mismatches.length) return failure(mismatches, 'COMMAND_FAILED');
+    return result(metadata);
+  } catch (error) {
+    return failure([problem('IR_GENERATION_METADATA_INVALID', String(error), IR_GENERATION_METADATA_FILE)], 'COMMAND_FAILED');
+  }
+};
 
 export const deployCampaign = async (options: DeployOptions): Promise<OperationResult<DeploymentSummary>> => {
   const warnings: Problem[] = [];
@@ -59,6 +119,12 @@ export const deployCampaign = async (options: DeployOptions): Promise<OperationR
     const validation = await validateCampaign(options.projectRoot, sourceRoot);
     warnings.push(...validation.warnings);
     if (!validation.ok) return failure(validation.problems, 'COMMAND_FAILED', warnings);
+    const generation = await validateDeploymentGeneration(
+      sourceRoot,
+      options.expectedGeneration,
+      options.requireGenerationMetadata || Boolean(options.expectedGeneration),
+    );
+    if (!generation.ok) return failure(generation.problems, 'COMMAND_FAILED', warnings);
     const manifest = await loadManifest(sourceRoot);
     const runtime = await ensureRuntime(options.projectRoot, { transport: options.transport, logger: options.logger });
     warnings.push(...runtime.warnings);
@@ -84,6 +150,15 @@ export const deployCampaign = async (options: DeployOptions): Promise<OperationR
         runtimeAsset: { name: runtime.value.entry.assetName, url: runtime.value.entry.assetUrl },
         moddingToolVersion: options.toolVersion || TOOL_VERSION,
         contractVersion: CONTRACT_VERSION,
+        ...(generation.data ? {
+          irGeneration: {
+            contentGeneration: generation.data.contentGeneration,
+            compilerVersion: generation.data.compilerVersion,
+            catalogGeneration: generation.data.catalogGeneration,
+            idRegistryGeneration: generationValue(generation.data),
+            targetContractVersion: generation.data.targetContractVersion,
+          },
+        } : {}),
       };
       await atomicWriteJson(path.join(tempPath, DEPLOYMENT_METADATA_FILE), metadata);
       await fs.rename(tempPath, finalPath);

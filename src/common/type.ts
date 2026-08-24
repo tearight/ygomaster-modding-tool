@@ -283,6 +283,8 @@ export interface ReadGateResponse {
 export interface CreateGateRequest {
   gate: Gate;
   filesPath?: string;
+  /** Explicit escape hatch for editing a reviewed legacy source tree. */
+  allowLegacyIrWrite?: boolean;
 }
 
 export interface CreateGateResponse {
@@ -293,6 +295,8 @@ export interface UpdateGateRequest {
   gate: Gate;
   prevId: number;
   filesPath?: string;
+  /** Explicit escape hatch for editing a reviewed legacy source tree. */
+  allowLegacyIrWrite?: boolean;
 }
 
 export interface UpdateGateResponse {
@@ -302,6 +306,8 @@ export interface UpdateGateResponse {
 export interface DeleteGateRequest {
   id: number;
   filesPath?: string;
+  /** Explicit escape hatch for editing a reviewed legacy source tree. */
+  allowLegacyIrWrite?: boolean;
 }
 
 export interface ReadStructureDecksRequest {
@@ -324,6 +330,8 @@ export interface ReadStructureDeckResponse {
 export interface CreateStructureDeckRequest {
   structureDeck: StructureDeck;
   filesPath?: string;
+  /** Explicit escape hatch for editing a reviewed legacy source tree. */
+  allowLegacyIrWrite?: boolean;
 }
 
 export interface CreateStructureDeckResponse {
@@ -334,6 +342,8 @@ export interface UpdateStructureDeckRequest {
   structureDeck: StructureDeck;
   prevId: number;
   filesPath?: string;
+  /** Explicit escape hatch for editing a reviewed legacy source tree. */
+  allowLegacyIrWrite?: boolean;
 }
 
 export interface UpdateStructureDeckResponse {
@@ -343,6 +353,8 @@ export interface UpdateStructureDeckResponse {
 export interface DeleteStructureDeckRequest {
   id: number;
   filesPath?: string;
+  /** Explicit escape hatch for editing a reviewed legacy source tree. */
+  allowLegacyIrWrite?: boolean;
 }
 
 /** Core-backed campaign deck document authoring. The path is relative to the
@@ -350,6 +362,8 @@ export interface DeleteStructureDeckRequest {
  */
 export interface DeckPathRequest {
   path: string;
+  /** Explicit escape hatch for editing a reviewed legacy source tree. */
+  allowLegacyIrWrite?: boolean;
 }
 
 export interface DeckWriteRequest extends DeckPathRequest {
@@ -380,6 +394,21 @@ export interface CoreOperationProblem {
   message: string;
   path?: string;
   severity?: 'error' | 'warning';
+  sourcePath?: string;
+  line?: number;
+  column?: number;
+  endLine?: number;
+  endColumn?: number;
+  end?: { line: number; column: number };
+  sourceSpan?: {
+    sourcePath?: string;
+    line: number;
+    column: number;
+    endLine: number;
+    endColumn: number;
+  };
+  jsonPointer?: string;
+  suggestion?: string;
 }
 
 export interface CoreOperationResult<T = unknown> {
@@ -394,6 +423,33 @@ export interface CoreOperationResult<T = unknown> {
 export interface CorePathsRequest {
   sourceRoot?: string;
   gameRoot?: string;
+}
+
+/** Paths are explicit UI inputs; projectRoot remains owned by the main process. */
+export interface ContentPathsRequest {
+  contentRoot?: string;
+  irRoot?: string;
+  registryPath?: string;
+}
+
+export interface ContentOperationRequest extends ContentPathsRequest {}
+
+export interface ContentRevealSourceRequest extends ContentPathsRequest {
+  sourcePath: string;
+}
+
+export interface ContentCompileRequest extends ContentPathsRequest {
+  /** Missing/false is check-only; apply requires both fields below. */
+  apply?: boolean;
+  expectedContentGeneration?: string;
+  confirmApply?: boolean;
+}
+
+export interface ContentDeployRequest extends ContentPathsRequest {
+  sourceRoot?: string;
+  gameRoot?: string;
+  /** Only an explicitly reviewed legacy source may bypass generation checks. */
+  allowLegacyIr?: boolean;
 }
 
 export interface CorePathRequest {

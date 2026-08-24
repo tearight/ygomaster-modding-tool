@@ -5,6 +5,7 @@ import { DeckList } from './components/deck/DeckList';
 import { GateCreate } from './components/gate/GateCreate';
 import { GateDetail } from './components/gate/GateDetail';
 import { GateList } from './components/gate/GateList';
+import { ContentPipeline } from './components/content/ContentPipeline';
 import { Layout } from './components/layout/Layout';
 import { SettingsDetail } from './components/settings/SettingsDetail';
 import { StructureDeckCreate } from './components/structure-deck/StructureDeckCreate';
@@ -53,6 +54,10 @@ export const router = createHashRouter([
       {
         path: 'utilities',
         element: <Utilities />,
+      },
+      {
+        path: 'content',
+        element: <ContentPipeline />,
       },
       {
         path: 'settings',

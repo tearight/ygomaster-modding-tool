@@ -1,4 +1,5 @@
 import * as fs from 'node:fs/promises';
+import { ParseErrorCode, parse as parseJsonWithComments, type ParseError } from 'jsonc-parser';
 
 import { JsonObject, JsonValue, PayloadSource } from './types';
 
@@ -69,7 +70,15 @@ export const stripJsonComments = (text: string): string => {
 };
 
 export const parseJsonc = <T = JsonValue>(text: string): T =>
-  JSON.parse(stripJsonComments(text)) as T;
+  (() => {
+    const errors: ParseError[] = [];
+    const value = parseJsonWithComments(text, errors, { allowTrailingComma: true, disallowComments: false }) as T;
+    const toleratedYgoMasterTail = errors.length > 0
+      && errors.every((entry) => entry.error === ParseErrorCode.EndOfFileExpected)
+      && /^[\s},]*$/u.test(text.slice(Math.min(...errors.map((entry) => entry.offset))));
+    if (errors.length && !toleratedYgoMasterTail) throw new SyntaxError(`Invalid JSONC at offset ${errors[0]?.offset ?? 0}`);
+    return value;
+  })();
 
 export const readJsonc = async <T = JsonValue>(filePath: string): Promise<T> =>
   parseJsonc<T>(await fs.readFile(filePath, 'utf8'));

@@ -12,7 +12,7 @@ import {
   readJsonFile,
   resolveInside,
 } from './fs';
-import { serializePayload, unwrapPayload } from './json';
+import { cloneJson, serializePayload, unwrapPayload } from './json';
 import { getWorkspacePaths, loadManifest } from './manifest';
 import { CoreLogger, JsonObject, Problem, SourceManifest, problem } from './types';
 
@@ -29,6 +29,8 @@ const GATE_MIN = 90000;
 const GATE_MAX = 90999;
 const STRUCTURE_MIN = 1129000;
 const STRUCTURE_MAX = 1129999;
+const SHOP_MIN = 1130000;
+const SHOP_MAX = 1130999;
 const LOCAL_CHAPTER_MAX = 9999;
 const nextId = (value: LooseObject, label: string) => {
   let candidate = Math.max(0, ...numericKeys(value)) + 1;
@@ -94,6 +96,7 @@ export const isForbiddenOverlay = (relative: string): boolean => {
   const parts = lower.split('/');
   const basename = parts.at(-1) || lower;
   const category = parts[0] || '';
+  if (['shop.json', 'shoppackodds.json'].includes(lower)) return false;
   return category === 'shop'
     || category === 'settings'
     || category === 'regulation'
@@ -101,6 +104,103 @@ export const isForbiddenOverlay = (relative: string): boolean => {
     || basename.startsWith('shoppackodds')
     || basename === 'settings.json'
     || basename.startsWith('regulation');
+};
+
+const findNamedArray = (value: unknown, key: string): unknown[] | undefined => {
+  if (Array.isArray(value)) {
+    for (const child of value) {
+      const found = findNamedArray(child, key);
+      if (found) return found;
+    }
+    return undefined;
+  }
+  if (!value || typeof value !== 'object') return undefined;
+  const record = value as LooseObject;
+  if (Array.isArray(record[key])) return record[key] as unknown[];
+  for (const child of Object.values(record)) {
+    const found = findNamedArray(child, key);
+    if (found) return found;
+  }
+  return undefined;
+};
+
+const replaceNamedArray = (value: unknown, key: string, replacement: unknown[]): boolean => {
+  if (Array.isArray(value)) return value.some((child) => replaceNamedArray(child, key, replacement));
+  if (!value || typeof value !== 'object') return false;
+  const record = value as LooseObject;
+  if (Array.isArray(record[key])) {
+    record[key] = replacement;
+    return true;
+  }
+  return Object.values(record).some((child) => replaceNamedArray(child, key, replacement));
+};
+
+const applyManagedShopOverlay = async (
+  overlayRoot: string,
+  runtimeRoot: string,
+  changedFiles: string[],
+): Promise<Set<string>> => {
+  const consumed = new Set<string>();
+  const shopOverlayPath = path.join(overlayRoot, 'Shop.json');
+  if (await exists(shopOverlayPath)) {
+    consumed.add('shop.json');
+    const managed = object(await readJsonFile(shopOverlayPath));
+    const additions = object(managed.PackShop);
+    if (!Object.keys(additions).length || Object.keys(managed).some((key) => key !== 'PackShop')) {
+      throw new Error('Managed Shop overlay must contain only a non-empty PackShop object');
+    }
+    const runtimePath = path.join(runtimeRoot, 'Data', 'Shop.json');
+    await assertRealPathInside(runtimeRoot, runtimePath);
+    if (!(await exists(runtimePath))) throw new Error('Runtime Data/Shop.json is missing');
+    const runtimeDocument = await readJsonFile<JsonObject>(runtimePath);
+    const source = unwrapPayload<JsonObject>(runtimeDocument, 'PackShop');
+    const merged = { ...source.payload };
+    for (const [id, entry] of Object.entries(additions).sort(([left], [right]) => left.localeCompare(right, 'en'))) {
+      if (Object.prototype.hasOwnProperty.call(merged, id)) throw new Error(`Runtime Shop PackShop id already exists: ${id}`);
+      const pack = object(entry);
+      if (number(pack.packId, NaN) !== Number(id)) throw new Error(`Managed Shop packId does not match key: ${id}`);
+      if (Number(id) < SHOP_MIN || Number(id) > SHOP_MAX) throw new Error(`Managed Shop packId is outside the additive range: ${id}`);
+      merged[id] = cloneJson(pack) as never;
+    }
+    await atomicWriteJson(runtimePath, serializePayload({ PackShop: merged } as JsonObject, source));
+    changedFiles.push('Data/Shop.json');
+  }
+
+  const oddsOverlayPath = path.join(overlayRoot, 'ShopPackOdds.json');
+  if (await exists(oddsOverlayPath)) {
+    consumed.add('shoppackodds.json');
+    const managed = object(await readJsonFile(oddsOverlayPath));
+    const additions = array(managed.entries);
+    if (!additions.length || Object.keys(managed).some((key) => key !== 'entries')) {
+      throw new Error('Managed ShopPackOdds overlay must contain only a non-empty entries array');
+    }
+    const runtimePath = path.join(runtimeRoot, 'Data', 'ShopPackOdds.json');
+    await assertRealPathInside(runtimeRoot, runtimePath);
+    const runtimeDocument: unknown = await exists(runtimePath) ? await readJsonFile(runtimePath) : [];
+    const existing = Array.isArray(runtimeDocument) ? runtimeDocument : findNamedArray(runtimeDocument, 'ShopPackOdds');
+    if (!existing) throw new Error('Runtime ShopPackOdds must be a raw array or contain a ShopPackOdds array');
+    const names = new Set(existing.map((entry) => string(object(entry).name)).filter(Boolean));
+    const ids = new Set(existing.flatMap((entry) => array(object(entry).packShopIds).filter((id): id is number => Number.isInteger(id))));
+    for (const entry of additions) {
+      const odds = object(entry);
+      const name = string(odds.name);
+      const packIds = array(odds.packShopIds).filter((id): id is number => Number.isInteger(id));
+      if (!name || !packIds.length || !Array.isArray(odds.cardRateList)) throw new Error('Managed Shop odds entry requires name, packShopIds, and cardRateList');
+      if (names.has(name)) throw new Error(`Runtime Shop odds name already exists: ${name}`);
+      if (packIds.some((id) => ids.has(id))) throw new Error(`Runtime Shop odds packShopId already exists: ${packIds.find((id) => ids.has(id))}`);
+      names.add(name);
+      packIds.forEach((id) => ids.add(id));
+    }
+    const merged = [...existing, ...additions.map((entry) => cloneJson(entry))];
+    let generated: unknown = merged;
+    if (!Array.isArray(runtimeDocument)) {
+      generated = cloneJson(runtimeDocument);
+      if (!replaceNamedArray(generated, 'ShopPackOdds', merged)) throw new Error('Could not preserve ShopPackOdds wrapper shape');
+    }
+    await atomicWriteJson(runtimePath, generated);
+    changedFiles.push('Data/ShopPackOdds.json');
+  }
+  return consumed;
 };
 
 export const unsupportedChapterPackFields = [
@@ -276,7 +376,11 @@ export const applyCampaignOverlay = async (
       chapterRecord.mydeck_set_id = 0;
       chapterRecord.set_id = 0;
       chapterRecord.unlock_id = 0;
-      chapterRecord.begin_sn = string(sourceChapter.begin_sn);
+      // The additive source format carries chapter descriptions for IDS,
+      // while `begin_sn` is reserved for Scenario scripts.  The current
+      // compiler has no Scenario kind; never let stale/generated/handwritten
+      // source data reclassify a chapter as Scenario at the runtime boundary.
+      chapterRecord.begin_sn = '';
       const duel = sourceChapter.type === 'Duel' || typeof sourceChapter.cpu_deck === 'string';
       chapterRecord.npc_id = duel ? 1 : 0;
       if (sourceChapter.difficulty !== undefined) chapterRecord.difficulty = number(sourceChapter.difficulty);
@@ -362,9 +466,12 @@ export const applyCampaignOverlay = async (
   await atomicWriteJson(soloPath, generatedSolo);
   changedFiles.push('Data/Solo.json');
 
+  const managedShopOverlays = await applyManagedShopOverlay(paths.overlayRoot, runtimeRoot, changedFiles);
+
   const overlayFiles = await listFiles(paths.overlayRoot);
   for (const file of overlayFiles) {
     const relative = path.relative(paths.overlayRoot, file).split(path.sep).join('/');
+    if (managedShopOverlays.has(relative.toLowerCase())) continue;
     if (isForbiddenOverlay(relative)) {
       warnings.push(problem('OVERLAY_SCOPE_UNSUPPORTED', `Skipped unsupported overlay ${relative}`, relative, 'warning'));
       continue;

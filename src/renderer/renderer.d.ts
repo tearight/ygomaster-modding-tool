@@ -28,6 +28,10 @@ import {
   CorePathsRequest,
   CatalogRefreshRequest,
   CatalogSearchRequest,
+  ContentCompileRequest,
+  ContentDeployRequest,
+  ContentOperationRequest,
+  ContentRevealSourceRequest,
 } from '../common/type';
 
 export interface ElectronAPI {
@@ -69,6 +73,13 @@ export interface ElectronAPI {
   workspaceInspect: (request?: CorePathsRequest) => Promise<CoreOperationResult>;
   campaignValidate: (request?: CorePathsRequest) => Promise<CoreOperationResult>;
   campaignDeploy: (request?: CorePathsRequest) => Promise<CoreOperationResult>;
+  contentInspect: (request?: ContentOperationRequest) => Promise<CoreOperationResult>;
+  contentResolve: (request?: ContentOperationRequest) => Promise<CoreOperationResult>;
+  contentValidate: (request?: ContentOperationRequest) => Promise<CoreOperationResult>;
+  contentCompile: (request: ContentCompileRequest) => Promise<CoreOperationResult>;
+  contentDiff: (request?: ContentOperationRequest) => Promise<CoreOperationResult>;
+  contentDeploy: (request?: ContentDeployRequest) => Promise<CoreOperationResult>;
+  contentRevealSource: (request: ContentRevealSourceRequest) => Promise<CoreOperationResult>;
   runtimeStatus: () => Promise<CoreOperationResult>;
   runtimeFetch: () => Promise<CoreOperationResult>;
   catalogStatus: () => Promise<CoreOperationResult>;

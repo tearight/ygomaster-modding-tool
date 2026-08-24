@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import * as fs from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 
 import {
@@ -38,6 +39,23 @@ import {
   problem,
   resolveProjectRoot,
   isCatalogSortField,
+  initializeLayeredWorkspace,
+  inspectLayeredWorkspace,
+  inspectCampaignContent,
+  resolveCampaignContent,
+  validateCampaignContentOperation,
+  compileCampaignContentOperation,
+  diffCampaignContent,
+  discoverContentSnapshot,
+  loadCardResolver,
+  readRegistry,
+  createEmptyRegistry,
+  exists,
+  IR_COMPILER_VERSION,
+  YGOMASTER_TARGET_CONTRACT_VERSION,
+  previewSourceMigration,
+  applySourceMigration,
+  SourceMigrationCandidateFile,
 } from '../core';
 
 interface ParsedArgs {
@@ -74,6 +92,13 @@ export const CLI_COMMAND_REGISTRY = [
   'trash restore',
   'campaign validate',
   'campaign deploy',
+  'content inspect',
+  'content resolve',
+  'content validate',
+  'content compile',
+  'content diff',
+  'migration preview',
+  'migration apply',
   'runtime status',
   'runtime fetch',
   'catalog status',
@@ -128,7 +153,11 @@ const optionNumber = (parsed: ParsedArgs, key: string, fallback: number) => {
 const findProjectRoot = (): string => {
   const configured = process.env.YGOMASTER_TOOL_PROJECT_ROOT;
   if (configured) return path.resolve(configured);
-  return resolveProjectRoot(__dirname);
+  const applicationRoot = resolveProjectRoot(__dirname);
+  const workspaceCandidate = path.resolve(applicationRoot, '..', '..');
+  return existsSync(path.join(workspaceCandidate, 'campaign', 'content', 'manifest.json'))
+    ? workspaceCandidate
+    : applicationRoot;
 };
 
 const readJsonInput = async (parsed: ParsedArgs): Promise<JsonValue> => {
@@ -144,14 +173,43 @@ const readStdin = async (): Promise<string> => {
   return Buffer.concat(chunks).toString('utf8');
 };
 
+const readMigrationCandidate = async (candidateRoot: string): Promise<SourceMigrationCandidateFile[]> => {
+  const root = path.resolve(candidateRoot);
+  const output: SourceMigrationCandidateFile[] = [];
+  const visit = async (directory: string): Promise<void> => {
+    const entries = await fs.readdir(directory, { withFileTypes: true });
+    entries.sort((left, right) => left.name.localeCompare(right.name, 'en'));
+    for (const entry of entries) {
+      const absolute = path.join(directory, entry.name);
+      if (entry.isSymbolicLink()) throw new Error(`Migration candidate cannot contain symlinks: ${absolute}`);
+      if (entry.isDirectory()) await visit(absolute);
+      else if (entry.isFile()) output.push({ path: path.relative(root, absolute).split(path.sep).join('/'), content: await fs.readFile(absolute) });
+      else throw new Error(`Migration candidate cannot contain special entries: ${absolute}`);
+    }
+  };
+  await visit(root);
+  return output;
+};
+
 const usage = () =>
-  'Usage: node cli/index.js <command> [subcommand] [path] [--source path] [--game-root path] [--online] [--pretty]';
+  'Usage: node cli/index.js <command> [subcommand] [path] [--content path] [--ir path] [--registry path] [--check|--apply --expected-generation sha256] [--pretty]\nExamples: content inspect; content resolve; content validate; content compile --check; content compile --apply --expected-generation <sha256>; content diff; migration preview; migration apply --candidate <path> --accept --expected-source-generation <sha256> --expected-candidate-generation <sha256>';
 
 const commandResult = async (parsed: ParsedArgs, projectRoot: string): Promise<OperationResult<unknown>> => {
   const config = await readConfig(projectRoot);
   const sourceRoot = optionString(parsed, 'source') || config.sourceRoot;
   const gameRoot = optionString(parsed, 'game-root') || config.gameRoot;
   const [group, action] = parsed.command;
+  const resolvedSourceRoot = path.resolve(sourceRoot || path.join(projectRoot, 'campaign', 'source'));
+  const managedIr = resolvedSourceRoot === path.resolve(projectRoot, 'campaign', 'source')
+    || await exists(path.join(resolvedSourceRoot, 'generation.json'));
+
+  const contentOptions = {
+    projectRoot,
+    ...(optionString(parsed, 'content') ? { contentRoot: optionString(parsed, 'content') } : {}),
+    ...(optionString(parsed, 'ir') ? { irRoot: optionString(parsed, 'ir') } : {}),
+    ...(optionString(parsed, 'registry') ? { registryPath: optionString(parsed, 'registry') } : {}),
+    ...(parsed.options.get('allow-assumed-structure') === true ? { allowAssumedStructure: true } : {}),
+  };
 
   if (group === 'info') return result({ name: 'ygomaster-modding-tool', version: TOOL_VERSION, contractVersion: CONTRACT_VERSION, node: process.version, platform: process.platform });
   if (group === 'config') {
@@ -164,14 +222,26 @@ const commandResult = async (parsed: ParsedArgs, projectRoot: string): Promise<O
     }
   }
   if (group === 'workspace') {
-    if (action === 'init') return result(await initWorkspace(projectRoot, sourceRoot));
-    if (action === 'inspect') return inspectWorkspace(projectRoot, sourceRoot);
+    if (action === 'init') {
+      const layers = await initializeLayeredWorkspace(projectRoot);
+      const source = await initWorkspace(projectRoot, sourceRoot);
+      return result({ layers, source });
+    }
+    if (action === 'inspect') {
+      const source = await inspectWorkspace(projectRoot, sourceRoot);
+      if (!source.ok) return source;
+      const layers = await inspectLayeredWorkspace(projectRoot);
+      const errors = layers.problems.filter((entry) => entry.severity !== 'warning');
+      const warnings = layers.problems.filter((entry) => entry.severity === 'warning');
+      return errors.length ? failure(errors, 'COMMAND_FAILED', [...source.warnings, ...warnings]) : result({ source: source.data, layers }, [...source.warnings, ...warnings]);
+    }
   }
   if (group === 'trash') {
     if (action === 'list') return listTrash(projectRoot, sourceRoot);
     if (action === 'restore') {
       const value = parsed.positionals[0];
       if (!value) return failure([problem('USAGE', 'trash restore requires a .trash relative path')], 'USAGE_ERROR');
+      if (managedIr) return failure([problem('IR_MANAGED_READ_ONLY', 'Compiler-managed campaign/source cannot be restored or edited directly')], 'COMMAND_FAILED');
       return restoreTrash(projectRoot, sourceRoot, value);
     }
   }
@@ -179,7 +249,73 @@ const commandResult = async (parsed: ParsedArgs, projectRoot: string): Promise<O
     if (action === 'validate') return validateCampaign(projectRoot, sourceRoot);
     if (action === 'deploy') {
       if (!gameRoot) return failure([problem('GAME_ROOT_REQUIRED', 'Configure game root before deploy')], 'PATH_ERROR');
-      return deployCampaign({ projectRoot, sourceRoot, gameRoot });
+      const deploySourceRoot = path.resolve(sourceRoot || path.join(projectRoot, 'campaign', 'source'));
+      const managedGenerationPath = path.join(deploySourceRoot, 'generation.json');
+      if (!(await exists(managedGenerationPath))) {
+        if (parsed.options.get('allow-legacy-ir') !== true) {
+          return failure([problem('IR_GENERATION_METADATA_MISSING', 'Managed deploy requires generation.json; use --allow-legacy-ir only for an explicitly reviewed legacy source')], 'COMMAND_FAILED');
+        }
+        return deployCampaign({ projectRoot, sourceRoot: deploySourceRoot, gameRoot });
+      }
+      const contentRoot = path.resolve(optionString(parsed, 'content') || path.join(projectRoot, 'campaign', 'content'));
+      const registryPath = path.resolve(optionString(parsed, 'registry') || path.join(projectRoot, 'campaign', 'id-registry.json'));
+      const snapshot = await discoverContentSnapshot(contentRoot, { projectRoot });
+      if (!snapshot.ok || !snapshot.snapshot) return failure(snapshot.problems, 'COMMAND_FAILED');
+      const resolver = await loadCardResolver(projectRoot);
+      const registry = await exists(registryPath) ? await readRegistry(registryPath) : createEmptyRegistry();
+      return deployCampaign({
+        projectRoot,
+        sourceRoot: deploySourceRoot,
+        gameRoot,
+        requireGenerationMetadata: true,
+        expectedGeneration: {
+          contentGeneration: snapshot.snapshot.contentGeneration,
+          compilerVersion: IR_COMPILER_VERSION,
+          catalogGeneration: resolver.catalogGeneration,
+          idRegistryGeneration: registry.generation,
+          targetContractVersion: YGOMASTER_TARGET_CONTRACT_VERSION,
+        },
+      });
+    }
+  }
+  if (group === 'content') {
+    if (action === 'inspect') return inspectCampaignContent(contentOptions);
+    if (action === 'resolve') return resolveCampaignContent(contentOptions);
+    if (action === 'validate') return validateCampaignContentOperation(contentOptions);
+    if (action === 'diff') return diffCampaignContent(contentOptions);
+    if (action === 'compile') return compileCampaignContentOperation({
+      ...contentOptions,
+      apply: parsed.options.get('apply') === true,
+      ...(optionString(parsed, 'expected-generation') ? { expectedContentGeneration: optionString(parsed, 'expected-generation') } : {}),
+    });
+  }
+  if (group === 'migration') {
+    const candidateRoot = optionString(parsed, 'candidate');
+    const candidateFiles = candidateRoot ? await readMigrationCandidate(candidateRoot) : undefined;
+    const migrationOptions = {
+      projectRoot,
+      sourceRoot: resolvedSourceRoot,
+      contentRoot: path.resolve(optionString(parsed, 'content') || path.join(projectRoot, 'campaign', 'content')),
+      ...(candidateFiles ? { candidateFiles } : {}),
+    };
+    const preview = await previewSourceMigration(migrationOptions);
+    if (action === 'preview' || !preview.ok || !preview.data) return preview;
+    if (action === 'apply') {
+      const expectedSourceGeneration = optionString(parsed, 'expected-source-generation');
+      const expectedCandidateGeneration = optionString(parsed, 'expected-candidate-generation');
+      if (!candidateRoot || !expectedSourceGeneration || !expectedCandidateGeneration || parsed.options.get('accept') !== true) {
+        return failure([problem('USAGE', 'migration apply requires --candidate, --accept, --expected-source-generation, and --expected-candidate-generation')], 'USAGE_ERROR');
+      }
+      if (preview.data.candidateGeneration !== expectedCandidateGeneration) {
+        return failure([problem('MIGRATION_PREVIEW_STALE', 'Reviewed candidate generation does not match the current candidate directory')], 'COMMAND_FAILED');
+      }
+      return applySourceMigration({
+        ...migrationOptions,
+        preview: preview.data,
+        accept: true,
+        expectedSourceGeneration,
+        ...(optionString(parsed, 'backup') ? { backupRoot: optionString(parsed, 'backup') } : {}),
+      });
     }
   }
   if (group === 'runtime') {
@@ -233,6 +369,9 @@ const commandResult = async (parsed: ParsedArgs, projectRoot: string): Promise<O
     const relativePath = parsed.positionals[0];
     if (!relativePath) return failure([problem('USAGE', `${group} ${action} requires a relative JSON path`)], 'USAGE_ERROR');
     if (action === 'read') return readDocument(projectRoot, sourceRoot, type, relativePath);
+    if (action === 'write' || action === 'delete') {
+      if (managedIr) return failure([problem('IR_MANAGED_READ_ONLY', 'Compiler-managed campaign/source is read-only; edit campaign/content and run content compile')], 'COMMAND_FAILED');
+    }
     if (action === 'write') return writeDocument(projectRoot, sourceRoot, type, relativePath, await readJsonInput(parsed), parsed.options.get('replace') === true);
     if (action === 'delete') return deleteDocument(projectRoot, sourceRoot, type, relativePath);
   }

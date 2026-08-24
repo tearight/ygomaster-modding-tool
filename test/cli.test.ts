@@ -14,6 +14,8 @@ const requiredCommands = [
   'structure list', 'structure read', 'structure write', 'structure delete',
   'trash list', 'trash restore',
   'campaign validate', 'campaign deploy',
+  'content inspect', 'content resolve', 'content validate', 'content compile', 'content diff',
+  'migration preview', 'migration apply',
   'runtime status', 'runtime fetch',
   'catalog status', 'catalog refresh', 'catalog search', 'catalog custom-validate',
   'deployment list', 'deployment inspect', 'deployment launch',
@@ -40,6 +42,9 @@ describe('CLI contract', () => {
     assert.equal(JSON.parse(output.at(-1) as string).exitName, 'USAGE_ERROR');
     const missingPath = await runCli(['gate', 'read'], { stdout: (value) => output.push(value), stderr: (value) => errors.push(value) });
     assert.equal(missingPath, EXIT_CODES.USAGE_ERROR);
+    const managedWrite = await runCli(['deck', 'delete', 'demo.json'], { stdout: (value) => output.push(value), stderr: (value) => errors.push(value) });
+    assert.equal(managedWrite, EXIT_CODES.COMMAND_FAILED);
+    assert.equal(JSON.parse(output.at(-1) as string).problems[0].code, 'IR_MANAGED_READ_ONLY');
   });
 
   it('selects the release asset from the resolved latest tag', async () => {
@@ -50,5 +55,16 @@ describe('CLI contract', () => {
     assert.equal(release.tag, 'v9.2');
     assert.equal(release.assetName, 'YgoMaster-v9.2.zip');
     await assert.rejects(() => resolveLatestRelease({ getJson: async () => ({ assets: [] }), getBytes: async () => new Uint8Array() }), /missing tag_name/);
+  });
+
+  it('exposes a read-only content inspect command with the stable result envelope', async () => {
+    const output: string[] = [];
+    const code = await runCli(['content', 'inspect'], { stdout: (value) => output.push(value) });
+    assert.equal(code, 0);
+    const inspected = JSON.parse(output[0]) as { ok: boolean; exitName: string; data: { contentGeneration: string; families: object } };
+    assert.equal(inspected.ok, true);
+    assert.equal(inspected.exitName, 'SUCCESS');
+    assert.equal(typeof inspected.data.contentGeneration, 'string');
+    assert.equal(typeof inspected.data.families, 'object');
   });
 });

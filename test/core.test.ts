@@ -167,12 +167,18 @@ describe('core contracts', () => {
     await fs.writeFile(path.join(sourceRoot, 'deck', 'cpu.json'), JSON.stringify({ name: 'cpu', m: { ids: [10001], r: [1] }, e: { ids: [], r: [] }, s: { ids: [], r: [] } }));
     await fs.writeFile(path.join(sourceRoot, 'gate', '90001.json'), JSON.stringify({ id: 90001, parent_id: 0, name: 'Fixture Gate', description: 'Test', priority: 1, illust_id: 4027, clear_chapter: { gateId: 90001, chapterId: 1 }, chapters: [{ id: 1, parent_id: 0, type: 'Duel', description: 'Duel', cpu_deck: 'cpu.json', cpu_name: 'CPU', unlock_secret: '10001', unlock_pack: [10001], secretType: 4, unlockSecrets: [10001] }] }));
     await fs.mkdir(path.join(sourceRoot, 'overlay', 'ClientData'), { recursive: true });
+    await fs.mkdir(path.join(sourceRoot, 'overlay', 'ClientData', 'SoloGateBackgrounds'), { recursive: true });
     await Promise.all([
       fs.writeFile(path.join(sourceRoot, 'overlay', 'ClientData', 'Shop.json'), '{}'),
       fs.writeFile(path.join(sourceRoot, 'overlay', 'ClientData', 'ShopPackOdds.json'), '{}'),
       fs.writeFile(path.join(sourceRoot, 'overlay', 'ClientData', 'ShopPackOddsVisuals.json'), '{}'),
       fs.writeFile(path.join(sourceRoot, 'overlay', 'ClientData', 'Settings.json'), '{}'),
       fs.writeFile(path.join(sourceRoot, 'overlay', 'ClientData', 'RegulationMaster.json'), '{}'),
+      fs.writeFile(path.join(sourceRoot, 'overlay', 'ClientData', 'SoloGateBackgrounds', '90001.png'), Uint8Array.from([
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+        0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+        0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00,
+      ])),
     ]);
 
     const cacheRuntime = path.join(root, '.cache', 'ygomaster', 'releases', 'v1.77', 'runtime');
