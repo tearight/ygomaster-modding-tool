@@ -22,7 +22,8 @@
     "smoke:layered-campaign": "node scripts/smoke-layered-campaign.mjs",
     "smoke:deploy": "node scripts/smoke-deploy.mjs",
     "smoke:app": "node scripts/smoke-app.mjs",
-    "lint": "eslint --ext .ts,.tsx .",
+    "lint": "eslint --cache --cache-location .eslintcache --ext .ts,.tsx .",
+    "lint:files": "eslint --cache --cache-location .eslintcache --ext .ts,.tsx",
     "storybook": "storybook dev -p 6006",
     "build-storybook": "storybook build",
     "type-check": "tsc --noEmit"
