@@ -73,7 +73,7 @@ export const StructureDeckDetailView = ({
   const classes = useStyles();
 
   const defaultValuesForCreation = useMemo(() => {
-    // Campaign structure decks use the additive 1129000-1129999 range.
+    // Campaign structure decks use the project-owned 1129000-1129999 range.
     const id = Math.max(...structureDecks.map(({ id }) => id), 1129000) + 1;
 
     return { ...defaultStructureDeck, id };

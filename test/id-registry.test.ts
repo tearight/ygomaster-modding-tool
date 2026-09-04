@@ -20,6 +20,7 @@ import {
   parseRegistry,
   planRegistry,
   readRegistry,
+  reviewRegistryPlan,
   renameRegistryKey,
   retireRegistryKey,
   retireRegistryKeyWithDependents,
@@ -59,10 +60,12 @@ describe('deterministic YgoMaster target ID registry', () => {
     const registry = await loadBase();
     assert.equal(validateRegistry(registry).length, 0);
     assert.equal(registry.registryVersion, ID_REGISTRY_VERSION);
-    assert.deepEqual(ID_NAMESPACE_RANGES.gate, { min: 90000, max: 90999 });
+    assert.deepEqual(ID_NAMESPACE_RANGES.gate, { min: 100, max: 2101 });
     assert.deepEqual(ID_NAMESPACE_RANGES.structure, { min: 1129000, max: 1129999 });
-    assert.equal(compositeChapterId(90001, 1), 900010001);
-    assert.deepEqual(chapterParts(900010001), { gateId: 90001, localId: 1 });
+    assert.equal(compositeChapterId(100, 1), 1000001);
+    assert.deepEqual(chapterParts(1000001), { gateId: 100, localId: 1 });
+    assert.equal(compositeChapterId(2101, 10), 21010010);
+    assert.deepEqual(chapterParts(21010010), { gateId: 2101, localId: 10 });
     assert.equal(computeRegistryGeneration(registry), registry.generation);
   });
 
@@ -73,9 +76,9 @@ describe('deterministic YgoMaster target ID registry', () => {
     const reverse = planRegistry(registry, [...requests].reverse());
     assert.deepEqual(reverse.registry, forward.registry);
     assert.deepEqual(reverse.diff, forward.diff);
-    assert.equal(forward.registry.namespaces.gate.assignments['gate.beta']?.id, 90000);
-    assert.equal(forward.registry.namespaces.gate.assignments['gate.pinned']?.id, 90010);
-    assert.equal(forward.registry.namespaces.chapter.assignments['chapter.alpha.second']?.id, 900010002);
+    assert.equal(forward.registry.namespaces.gate.assignments['gate.beta']?.id, 102);
+    assert.equal(forward.registry.namespaces.gate.assignments['gate.pinned']?.id, 110);
+    assert.equal(forward.registry.namespaces.chapter.assignments['chapter.alpha.second']?.id, 1000002);
     assert.equal(forward.registry.namespaces.shop.assignments['shop.beta']?.id, 1130001);
     assert.equal(forward.registry.fixtureUnknown && (forward.registry.fixtureUnknown as { preserve?: boolean }).preserve, true);
   });
@@ -86,40 +89,40 @@ describe('deterministic YgoMaster target ID registry', () => {
       { namespace: 'gate', key: 'gate.alpha' },
       { namespace: 'gate', key: 'gate.new' },
     ]);
-    assert.equal(plan.registry.namespaces.gate.assignments['gate.alpha']?.id, 90001);
-    assert.equal(plan.registry.namespaces.gate.assignments['gate.new']?.id, 90000);
+    assert.equal(plan.registry.namespaces.gate.assignments['gate.alpha']?.id, 100);
+    assert.equal(plan.registry.namespaces.gate.assignments['gate.new']?.id, 102);
     expectSyncCode(() => planRegistry(registry, [{ namespace: 'gate', key: 'gate.retired' }]), 'ID_REGISTRY_TOMBSTONE_REUSE');
-    expectSyncCode(() => planRegistry(registry, [{ namespace: 'gate', key: 'gate.new', pin: 90002 }]), 'ID_REGISTRY_TOMBSTONE_REUSE');
+    expectSyncCode(() => planRegistry(registry, [{ namespace: 'gate', key: 'gate.new', pin: 101 }]), 'ID_REGISTRY_TOMBSTONE_REUSE');
     expectSyncCode(() => retireRegistryKey(registry, 'gate', 'missing'), 'ID_REGISTRY_ASSIGNMENT_MISSING');
   });
 
   it('supports explicit pins and reports invalid pin, collision, runtime, and exhaustion errors', async () => {
     const registry = await loadBase();
-    const pinned = planRegistry(registry, [{ namespace: 'gate', key: 'gate.explicit', pin: 90020 }]);
-    assert.equal(pinned.registry.namespaces.gate.assignments['gate.explicit']?.id, 90020);
+    const pinned = planRegistry(registry, [{ namespace: 'gate', key: 'gate.explicit', pin: 120 }]);
+    assert.equal(pinned.registry.namespaces.gate.assignments['gate.explicit']?.id, 120);
     const pinWins = planRegistry(registry, [
       { namespace: 'gate', key: 'gate.before-pin' },
-      { namespace: 'gate', key: 'gate.after-pin', pin: 90000 },
+      { namespace: 'gate', key: 'gate.after-pin', pin: 110 },
     ]);
-    assert.equal(pinWins.registry.namespaces.gate.assignments['gate.after-pin']?.id, 90000);
-    assert.equal(pinWins.registry.namespaces.gate.assignments['gate.before-pin']?.id, 90003);
+    assert.equal(pinWins.registry.namespaces.gate.assignments['gate.after-pin']?.id, 110);
+    assert.equal(pinWins.registry.namespaces.gate.assignments['gate.before-pin']?.id, 102);
     expectSyncCode(() => planRegistry(registry, [{ namespace: 'gate', key: 'gate.bad', pin: 1 }]), 'ID_REGISTRY_PIN_INVALID');
     expectSyncCode(() => planRegistry(registry, [
-      { namespace: 'gate', key: 'gate.one', pin: 90020 },
-      { namespace: 'gate', key: 'gate.two', pin: 90020 },
+      { namespace: 'gate', key: 'gate.one', pin: 120 },
+      { namespace: 'gate', key: 'gate.two', pin: 120 },
     ]), 'ID_REGISTRY_COLLISION');
-    expectSyncCode(() => planRegistry(registry, [{ namespace: 'gate', key: 'gate.runtime', pin: 90020 }], { runtimeOccupied: { gate: [90020] } }), 'ID_REGISTRY_RUNTIME_COLLISION');
+    expectSyncCode(() => planRegistry(registry, [{ namespace: 'gate', key: 'gate.runtime', pin: 120 }], { runtimeOccupied: { gate: [120] } }), 'ID_REGISTRY_RUNTIME_COLLISION');
     expectSyncCode(() => planRegistry(registry, [
       { namespace: 'reward', key: 'reward.one' },
       { namespace: 'reward', key: 'reward.two' },
     ], { rangeOverrides: { reward: { min: 910001, max: 910001 } } }), 'ID_REGISTRY_EXHAUSTED');
-    expectSyncCode(() => planRegistry(registry, [{ namespace: 'chapter', key: 'chapter.bad-pin', gateKey: 'gate.alpha', localId: 1, pin: 900010002 }]), 'ID_REGISTRY_PIN_INVALID');
-    const pinnedChapter = planRegistry(registry, [{ namespace: 'chapter', key: 'chapter.explicit-pin', pin: compositeChapterId(90001, 7) }]);
-    assert.deepEqual(pinnedChapter.registry.namespaces.chapter.assignments['chapter.explicit-pin'], { id: 900010007, gateId: 90001, localId: 7 });
-    const pinnedWithGate = planRegistry(registry, [{ namespace: 'chapter', key: 'chapter.explicit-pin-gate', gateKey: 'gate.alpha', pin: compositeChapterId(90001, 8) }]);
-    assert.deepEqual(pinnedWithGate.registry.namespaces.chapter.assignments['chapter.explicit-pin-gate'], { id: 900010008, gateKey: 'gate.alpha', localId: 8 });
-    const pinnedWithCompatibilityMetadata = planRegistry(registry, [{ namespace: 'chapter', key: 'chapter.explicit-localChapterId', gateKey: 'gate.alpha', localChapterId: 9, pin: compositeChapterId(90001, 9) }]);
-    assert.deepEqual(pinnedWithCompatibilityMetadata.registry.namespaces.chapter.assignments['chapter.explicit-localChapterId'], { id: 900010009, gateKey: 'gate.alpha', localId: 9 });
+    expectSyncCode(() => planRegistry(registry, [{ namespace: 'chapter', key: 'chapter.bad-pin', gateKey: 'gate.alpha', localId: 1, pin: 1000002 }]), 'ID_REGISTRY_PIN_INVALID');
+    const pinnedChapter = planRegistry(registry, [{ namespace: 'chapter', key: 'chapter.explicit-pin', pin: compositeChapterId(100, 7) }]);
+    assert.deepEqual(pinnedChapter.registry.namespaces.chapter.assignments['chapter.explicit-pin'], { id: 1000007, gateId: 100, localId: 7 });
+    const pinnedWithGate = planRegistry(registry, [{ namespace: 'chapter', key: 'chapter.explicit-pin-gate', gateKey: 'gate.alpha', pin: compositeChapterId(100, 8) }]);
+    assert.deepEqual(pinnedWithGate.registry.namespaces.chapter.assignments['chapter.explicit-pin-gate'], { id: 1000008, gateKey: 'gate.alpha', localId: 8 });
+    const pinnedWithCompatibilityMetadata = planRegistry(registry, [{ namespace: 'chapter', key: 'chapter.explicit-localChapterId', gateKey: 'gate.alpha', localChapterId: 9, pin: compositeChapterId(100, 9) }]);
+    assert.deepEqual(pinnedWithCompatibilityMetadata.registry.namespaces.chapter.assignments['chapter.explicit-localChapterId'], { id: 1000009, gateKey: 'gate.alpha', localId: 9 });
     expectSyncCode(() => planRegistry(registry, [{ namespace: 'chapter', key: 'chapter.conflicting-local-metadata', gateKey: 'gate.alpha', localId: 9, localChapterId: 10 }]), 'ID_REGISTRY_CHAPTER_RULE_INVALID');
     expectSyncCode(() => compositeChapterId(214749, 9999), 'ID_REGISTRY_INT32_OVERFLOW');
   });
@@ -151,17 +154,17 @@ describe('deterministic YgoMaster target ID registry', () => {
     };
     expectSyncCode(() => migrateRegistry(registry, [gateMove]), 'ID_REGISTRY_DEPENDENCY_MIGRATION_REQUIRED');
     const plan = migrateRegistry(registry, [gateMove, chapterMove]);
-    assert.equal(plan.registry.namespaces.gate.assignments['gate.moved']?.id, 90000);
-    assert.equal(plan.registry.namespaces.gate.tombstones['gate.alpha']?.id, 90001);
-    assert.deepEqual(plan.registry.namespaces.chapter.assignments['chapter.moved'], { id: 900000001, gateKey: 'gate.moved', localId: 1 });
-    assert.equal(plan.registry.namespaces.chapter.tombstones['chapter.alpha.first']?.id, 900010001);
+    assert.equal(plan.registry.namespaces.gate.assignments['gate.moved']?.id, 102);
+    assert.equal(plan.registry.namespaces.gate.tombstones['gate.alpha']?.id, 100);
+    assert.deepEqual(plan.registry.namespaces.chapter.assignments['chapter.moved'], { id: 1020001, gateKey: 'gate.moved', localId: 1 });
+    assert.equal(plan.registry.namespaces.chapter.tombstones['chapter.alpha.first']?.id, 1000001);
     assert.equal(validateRegistry(plan.registry).length, 0);
     const wrapped = migrateRegistry(registry, { migrations: [gateMove, chapterMove] });
     assert.deepEqual(wrapped.registry, plan.registry);
     const withDestination = planRegistry(registry, [{ namespace: 'gate', key: 'gate.moved' }]).registry;
     const retired = retireRegistryKeyWithDependents(withDestination, 'gate', 'gate.alpha', [chapterMove]);
     assert.equal(retired.registry.namespaces.gate.assignments['gate.alpha'], undefined);
-    assert.equal(retired.registry.namespaces.gate.tombstones['gate.alpha']?.id, 90001);
+    assert.equal(retired.registry.namespaces.gate.tombstones['gate.alpha']?.id, 100);
     assert.equal(validateRegistry(retired.registry).length, 0);
   });
 
@@ -178,12 +181,24 @@ describe('deterministic YgoMaster target ID registry', () => {
   it('uses rename and move migration primitives without silent renumbering', async () => {
     const registry = await loadBase();
     const renamed = renameRegistryKey(registry, 'gate', 'gate.alpha', 'gate.renamed');
-    assert.equal(renamed.registry.namespaces.gate.assignments['gate.renamed']?.id, 90001);
+    assert.equal(renamed.registry.namespaces.gate.assignments['gate.renamed']?.id, 100);
     assert.equal(renamed.registry.namespaces.gate.assignments['gate.alpha'], undefined);
     assert.equal(renamed.registry.namespaces.chapter.assignments['chapter.alpha.first']?.gateKey, 'gate.renamed');
-    assert.equal(renamed.diff.some((entry) => entry.namespace === 'gate' && entry.key === 'gate.alpha' && entry.action === 'remove' && entry.before === 90001), true);
-    assert.equal(renamed.diff.some((entry) => entry.namespace === 'gate' && entry.key === 'gate.renamed' && entry.action === 'add' && entry.after === 90001), true);
+    assert.equal(renamed.diff.some((entry) => entry.namespace === 'gate' && entry.key === 'gate.alpha' && entry.action === 'remove' && entry.before === 100), true);
+    assert.equal(renamed.diff.some((entry) => entry.namespace === 'gate' && entry.key === 'gate.renamed' && entry.action === 'add' && entry.after === 100), true);
     assert.equal(renamed.diff.some((entry) => entry.namespace === 'chapter' && entry.key === 'chapter.alpha.first' && entry.metadataChanged === true), true);
+    const review = reviewRegistryPlan(registry, renamed.registry);
+    assert.equal(review.baseGeneration, registry.generation);
+    assert.equal(review.plannedGeneration, renamed.generation);
+    assert.deepEqual(review.namespaces.map((entry) => entry.namespace), ['gate', 'chapter', 'reward', 'unlock', 'structure', 'shop']);
+    const gateChanges = review.namespaces.find((entry) => entry.namespace === 'gate')?.changes || [];
+    assert.equal(gateChanges.some((entry) => entry.action === 'remove' && entry.key === 'gate.alpha' && entry.dependentKeys.includes('chapter.alpha.first')), true);
+    assert.equal(gateChanges.some((entry) => entry.action === 'add' && entry.key === 'gate.renamed' && entry.dependentKeys.includes('chapter.alpha.first')), true);
+    const chapterChange = review.namespaces.find((entry) => entry.namespace === 'chapter')?.changes[0];
+    assert.equal(chapterChange?.action, 'update');
+    assert.equal(chapterChange?.metadataChanged, true);
+    assert.equal(chapterChange?.afterChapter?.expression, '100 × 10000 + 1 = 1000001');
+    assert.equal(chapterChange?.afterChapter?.gateKey, 'gate.renamed');
 
     const withGate = planRegistry(registry, [{ namespace: 'gate', key: 'gate.beta' }]).registry;
     const moved = moveRegistryKey(withGate, {
@@ -195,8 +210,10 @@ describe('deterministic YgoMaster target ID registry', () => {
       gateKey: 'gate.beta',
       localId: 1,
     });
-    assert.equal(moved.registry.namespaces.chapter.assignments['chapter.moved']?.id, 900000001);
-    assert.equal(moved.registry.namespaces.chapter.tombstones['chapter.alpha.first']?.id, 900010001);
+    assert.equal(moved.registry.namespaces.chapter.assignments['chapter.moved']?.id, 1020001);
+    assert.equal(moved.registry.namespaces.chapter.tombstones['chapter.alpha.first']?.id, 1000001);
+    const movedReview = reviewRegistryPlan(withGate, moved.registry);
+    assert.equal(movedReview.namespaces.find((entry) => entry.namespace === 'chapter')?.changes.some((entry) => entry.action === 'retire'), true);
     expectSyncCode(() => planRegistry(moved.registry, [{ namespace: 'chapter', key: 'chapter.alpha.first', gateKey: 'gate.beta', localId: 2 }]), 'ID_REGISTRY_TOMBSTONE_REUSE');
   });
 
@@ -210,7 +227,7 @@ describe('deterministic YgoMaster target ID registry', () => {
     assert.equal(await fs.stat(path.join(root, 'registry.json')).then(() => true), true);
     await expectAsyncCode(() => applyRegistryPlan(registryPath, plan), 'ID_REGISTRY_APPLY_REQUIRED');
     const applied = await applyRegistryPlan(registryPath, plan, { accept: true });
-    assert.equal(applied.registry.namespaces.gate.assignments['gate.applied']?.id, 90000);
+    assert.equal(applied.registry.namespaces.gate.assignments['gate.applied']?.id, 102);
     assert.equal((await readRegistry(registryPath)).generation, plan.generation);
     assert.equal((await readRegistry(registryPath)).fixtureUnknown && ((await readRegistry(registryPath)).fixtureUnknown as { preserve?: boolean }).preserve, true);
     assert.equal((await fs.readdir(root)).some((entry) => entry.includes('.staging-')), false);

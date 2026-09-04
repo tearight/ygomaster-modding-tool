@@ -5,7 +5,7 @@ import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-export const TARGET_CONTRACT_VERSION = 'ygomaster-campaign-target/v2';
+export const TARGET_CONTRACT_VERSION = 'ygomaster-campaign-target/v3';
 export const RELEASE_BUILD_STATE_VERSION = 2;
 
 const commandName = (name) => process.platform === 'win32' ? `${name}.cmd` : name;
@@ -179,6 +179,13 @@ export const copyCliRuntimeDependencies = async ({ editorRoot, stagingRoot, depe
     await fs.mkdir(path.dirname(destination), { recursive: true });
     await fs.cp(source, destination, { recursive: true });
   }
+};
+
+export const copyCliBuildOutput = async ({ distCliRoot, stagingRoot }) => {
+  if (!existsSync(path.join(distCliRoot, 'cli', 'index.js'))) {
+    throw new Error(`Portable CLI entrypoint is missing: ${path.join(distCliRoot, 'cli', 'index.js')}`);
+  }
+  await fs.cp(distCliRoot, stagingRoot, { recursive: true });
 };
 
 export const hashFile = async (file) => createHash('sha256').update(await fs.readFile(file)).digest('hex');

@@ -13,7 +13,6 @@ import {
 import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
-import { useAppStore } from '../../store';
 import { FileInput } from '../input/FileInput';
 
 const useStyles = makeStyles({
@@ -56,8 +55,7 @@ const deploymentEntries = (value: CoreResultLike | undefined): DeploymentEntry[]
 export const Utilities = () => {
   const classes = useStyles();
   const navigate = useNavigate();
-  const paths = useAppStore((state) => state.paths);
-  const [sourceRoot, setSourceRoot] = useState('');
+  const [workspaceRoot, setWorkspaceRoot] = useState('');
   const [gameRoot, setGameRoot] = useState('');
   const [lastResult, setLastResult] = useState<CoreResultLike>();
   const [deployments, setDeployments] = useState<CoreResultLike>();
@@ -78,8 +76,8 @@ export const Utilities = () => {
 
   const loadConfig = useCallback(async () => {
     const value = await window.electron.configShow();
-    const config = (value.data as { config?: { sourceRoot?: string; gameRoot?: string } } | undefined)?.config;
-    if (config?.sourceRoot) setSourceRoot(config.sourceRoot);
+    const config = (value.data as { config?: { workspaceRoot?: string; gameRoot?: string } } | undefined)?.config;
+    if (config?.workspaceRoot) setWorkspaceRoot(config.workspaceRoot);
     if (config?.gameRoot) setGameRoot(config.gameRoot);
   }, []);
 
@@ -115,21 +113,18 @@ export const Utilities = () => {
       <Card className={classes.card}>
         <CardHeader
           header={<Body1>Workspace</Body1>}
-          description={<Caption1>Configure source/game roots, initialize the source tree, and validate additive overlays.</Caption1>}
+          description={<Caption1>Configure the campaign workspace and game root. Content, generated IR, and the ID registry are derived from the workspace.</Caption1>}
         />
-        <Field label="Source root">
-          <FileInput value={sourceRoot} onChange={setSourceRoot} directory placeholder="Select campaign/source" />
+        <Field label="Campaign workspace">
+          <FileInput value={workspaceRoot} onChange={setWorkspaceRoot} directory placeholder="Select the folder containing campaign" />
         </Field>
         <Field label="Game root">
           <FileInput value={gameRoot} onChange={setGameRoot} directory placeholder="Select a game root" />
         </Field>
         <CardFooter className={classes.row}>
           <Button disabled={loading} onClick={() => navigate('/content')}>Content pipeline</Button>
-          <Button disabled={loading} onClick={() => run(() => window.electron.configSetSourceRoot({ path: sourceRoot }))}>Save source root</Button>
+          <Button disabled={loading || !workspaceRoot} onClick={() => run(() => window.electron.configSetWorkspaceRoot({ path: workspaceRoot }))}>Save campaign workspace</Button>
           <Button disabled={loading} onClick={() => run(() => window.electron.configSetGameRoot({ path: gameRoot }))}>Save game root</Button>
-          <Button disabled={loading} onClick={() => run(() => window.electron.workspaceInit({ sourceRoot }))}>Workspace init</Button>
-          <Button disabled={loading} onClick={() => run(() => window.electron.workspaceInspect({ sourceRoot }))}>Inspect</Button>
-          <Button appearance="primary" disabled={loading} onClick={() => run(() => window.electron.campaignValidate({ sourceRoot }))}>Validate</Button>
         </CardFooter>
       </Card>
 
@@ -141,7 +136,7 @@ export const Utilities = () => {
         <CardFooter className={classes.row}>
           <Button disabled={loading} onClick={() => run(() => window.electron.runtimeStatus())}>Runtime status</Button>
           <Button disabled={loading} onClick={() => run(() => window.electron.runtimeFetch())}>Fetch latest runtime</Button>
-          <Button appearance="primary" disabled={loading || !gameRoot} onClick={() => run(() => window.electron.campaignDeploy({ sourceRoot, gameRoot }))}>Deploy</Button>
+          <Button appearance="primary" disabled={loading || !gameRoot || !workspaceRoot} onClick={() => navigate('/content')}>Deploy in content pipeline</Button>
           <Button disabled={loading || !gameRoot} onClick={() => void refreshDeployments()}>Refresh deployments</Button>
         </CardFooter>
         {deployments && (
@@ -182,7 +177,6 @@ export const Utilities = () => {
         <CardHeader header={<Body1>Result</Body1>} description={<Caption1>CLI and UI operations return the same structured result contract.</Caption1>} />
         <pre className={classes.output}>{displayResult(lastResult)}</pre>
       </Card>
-      <Caption1>Authoring path: {paths.gatePath || 'not initialized'}</Caption1>
     </div>
   );
 };

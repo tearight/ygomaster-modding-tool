@@ -9,21 +9,11 @@ import {
 } from '@fluentui/react-components';
 import { OpenRegular, SaveRegular } from '@fluentui/react-icons';
 import { useCallback, useEffect, useState } from 'react';
-import {
-  Controller,
-  FormProvider,
-  Path,
-  useForm,
-  useFormContext,
-} from 'react-hook-form';
+import { Controller, FormProvider, useForm, useFormContext } from 'react-hook-form';
 
 import { Settings } from '../../../common/type';
 import { useWarnNavigation } from '../../hooks/useWarnNavigation';
-import { FileInput } from '../input/FileInput';
-
 const defaultSettings: Partial<Settings> = {
-  filesPath: undefined,
-  dataPath: '',
   language: 'English',
 };
 
@@ -105,45 +95,9 @@ export const SettingsDetailView = ({
               </Button>
             </div>
           </div>
-          <FileNameInput name="dataPath" required />
-          <FileNameInput
-            name="filesPath"
-            placeholder="The `files` directory located in the same directory as the app's executable"
-          />
           <LanguageInput />
         </form>
       </FormProvider>
-    </div>
-  );
-};
-
-interface FileInputProps {
-  name: Path<Settings>;
-  required?: boolean;
-  placeholder?: string;
-}
-
-const FileNameInput = ({ name, required, placeholder }: FileInputProps) => {
-  const classes = useStyles();
-  const { control } = useFormContext<Settings>();
-
-  return (
-    <div className={classes.space}>
-      <Controller
-        control={control}
-        name={name}
-        rules={{ required }}
-        render={({ field }) => (
-          <Field label={name} required={required}>
-            <FileInput
-              onChange={field.onChange}
-              value={field.value?.toString() ?? ''}
-              placeholder={placeholder || 'Select a directory'}
-              directory
-            />
-          </Field>
-        )}
-      />
     </div>
   );
 };

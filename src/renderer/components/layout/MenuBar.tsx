@@ -1,7 +1,11 @@
 import { Tab, TabList, Tooltip, makeStyles } from '@fluentui/react-components';
 import {
   ConferenceRoomRegular,
+  FlowRegular,
   LayerRegular,
+  ImageRegular,
+  ShoppingBagRegular,
+  DatabaseRegular,
   SettingsRegular,
   WrenchScrewdriverRegular,
 } from '@fluentui/react-icons';
@@ -44,6 +48,14 @@ export const MenuBar = () => {
           aria-label="Gates"
         />
       </Tooltip>
+      <Tooltip content="Content pipeline" relationship="label" positioning="after">
+        <Tab
+          className={classes.item}
+          icon={<FlowRegular />}
+          value="content"
+          aria-label="Content pipeline"
+        />
+      </Tooltip>
       <Tooltip content="Decks" relationship="label" positioning="after">
         <Tab
           className={classes.item}
@@ -51,6 +63,9 @@ export const MenuBar = () => {
           value="decks"
           aria-label="Decks"
         />
+      </Tooltip>
+      <Tooltip content="Shop packs" relationship="label" positioning="after">
+        <Tab className={classes.item} icon={<ShoppingBagRegular />} value="shop" aria-label="Shop packs" />
       </Tooltip>
       <Tooltip
         content="Structure Decks"
@@ -63,6 +78,15 @@ export const MenuBar = () => {
           value="structure-decks"
           aria-label="Structure Decks"
         />
+      </Tooltip>
+      <Tooltip content="Regulations" relationship="label" positioning="after">
+        <Tab className={classes.item} icon={<LayerRegular />} value="regulations" aria-label="Regulations" />
+      </Tooltip>
+      <Tooltip content="Localization and assets" relationship="label" positioning="after">
+        <Tab className={classes.item} icon={<ImageRegular />} value="localization-assets" aria-label="Localization and assets" />
+      </Tooltip>
+      <Tooltip content="Catalog administration" relationship="label" positioning="after">
+        <Tab className={classes.item} icon={<DatabaseRegular />} value="catalog" aria-label="Catalog administration" />
       </Tooltip>
       <Tooltip content="Utilities" relationship="label" positioning="after">
         <Tab

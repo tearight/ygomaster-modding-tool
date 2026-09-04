@@ -28,10 +28,26 @@ import {
   CorePathsRequest,
   CatalogRefreshRequest,
   CatalogSearchRequest,
+  CatalogServiceGetRequest,
+  CatalogServiceQueryRequest,
+  CatalogServiceQueryResult,
   ContentCompileRequest,
   ContentDeployRequest,
   ContentOperationRequest,
   ContentRevealSourceRequest,
+  ContentDocumentRequest,
+  ContentDocumentMutationRequest,
+  ContentDeckPreviewRequest,
+  ContentDeckWorkspaceRequest,
+  ContentDeckFoldersBootstrapRequest,
+  ContentShopReadRequest,
+  ContentShopMutationRequest,
+  ContentStructureMutationRequest,
+  ContentRegulationReadRequest,
+  ContentRegulationMutationRequest,
+  ContentLocalizationAssetMutationRequest,
+  ContentRuntimePolicyRequest,
+  ContentRuntimePolicyWriteRequest,
 } from '../common/type';
 
 export interface ElectronAPI {
@@ -69,6 +85,8 @@ export interface ElectronAPI {
   configShow: () => Promise<CoreOperationResult>;
   configSetGameRoot: (request: CorePathRequest) => Promise<CoreOperationResult>;
   configSetSourceRoot: (request: CorePathRequest) => Promise<CoreOperationResult>;
+  configSetWorkspaceRoot: (request: CorePathRequest) => Promise<CoreOperationResult>;
+  campaignWorkspaceStatus: () => Promise<CoreOperationResult>;
   workspaceInit: (request?: CorePathsRequest) => Promise<CoreOperationResult>;
   workspaceInspect: (request?: CorePathsRequest) => Promise<CoreOperationResult>;
   campaignValidate: (request?: CorePathsRequest) => Promise<CoreOperationResult>;
@@ -80,11 +98,29 @@ export interface ElectronAPI {
   contentDiff: (request?: ContentOperationRequest) => Promise<CoreOperationResult>;
   contentDeploy: (request?: ContentDeployRequest) => Promise<CoreOperationResult>;
   contentRevealSource: (request: ContentRevealSourceRequest) => Promise<CoreOperationResult>;
+  contentDocumentList: (request?: ContentDocumentRequest) => Promise<CoreOperationResult>;
+  contentDocumentRead: (request: ContentDocumentRequest) => Promise<CoreOperationResult>;
+  contentDocumentMutate: (request: ContentDocumentMutationRequest) => Promise<CoreOperationResult>;
+  contentDeckPreview: (request: ContentDeckPreviewRequest) => Promise<CoreOperationResult>;
+  contentDeckWorkspaceRead: (request?: ContentDeckWorkspaceRequest) => Promise<CoreOperationResult>;
+  contentDeckFoldersBootstrap: (request: ContentDeckFoldersBootstrapRequest) => Promise<CoreOperationResult>;
+  contentShopRead: (request: ContentShopReadRequest) => Promise<CoreOperationResult>;
+  contentShopMutate: (request: ContentShopMutationRequest) => Promise<CoreOperationResult>;
+  contentStructureMutate: (request: ContentStructureMutationRequest) => Promise<CoreOperationResult>;
+  contentRegulationRead: (request: ContentRegulationReadRequest) => Promise<CoreOperationResult>;
+  contentRegulationMutate: (request: ContentRegulationMutationRequest) => Promise<CoreOperationResult>;
+  contentLocalizationAssetInspect: (request?: ContentOperationRequest) => Promise<CoreOperationResult>;
+  contentLocalizationAssetMutate: (request: ContentLocalizationAssetMutationRequest) => Promise<CoreOperationResult>;
+  contentRuntimePolicyRead: (request?: ContentRuntimePolicyRequest) => Promise<CoreOperationResult>;
+  contentRuntimePolicyWrite: (request: ContentRuntimePolicyWriteRequest) => Promise<CoreOperationResult>;
   runtimeStatus: () => Promise<CoreOperationResult>;
   runtimeFetch: () => Promise<CoreOperationResult>;
   catalogStatus: () => Promise<CoreOperationResult>;
   catalogRefresh: (request?: CatalogRefreshRequest) => Promise<CoreOperationResult>;
   catalogSearch: (request: CatalogSearchRequest) => Promise<CoreOperationResult>;
+  catalogCustomValidate: () => Promise<CoreOperationResult>;
+  catalogServiceGet: (request: CatalogServiceGetRequest) => Promise<CoreOperationResult<CatalogServiceQueryResult>>;
+  catalogServiceQuery: (request: CatalogServiceQueryRequest) => Promise<CoreOperationResult<CatalogServiceQueryResult>>;
   deploymentList: (request?: CorePathsRequest) => Promise<CoreOperationResult>;
   deploymentInspect: (request: CorePathRequest) => Promise<CoreOperationResult>;
   deploymentLaunch: (request: CorePathRequest) => Promise<CoreOperationResult>;

@@ -10,14 +10,14 @@ import { YGOMASTER_TARGET_CONTRACT_VERSION } from '../src/core/layers';
 
 describe('campaign YgoMaster target contract', () => {
   it('keeps documented families open and separates approved Shop examples from undocumented Solo progression', () => {
-    assert.equal(YGOMASTER_TARGET_CONTRACT_VERSION, 'ygomaster-campaign-target/v2');
+    assert.equal(YGOMASTER_TARGET_CONTRACT_VERSION, 'ygomaster-campaign-target/v3');
     assert.deepEqual(validateTargetCapability('solo'), []);
     assert.deepEqual(validateTargetCapability('duel'), []);
     assert.deepEqual(validateTargetCapability('clientData'), []);
     assert.deepEqual(validateTargetCapability('shop').map((entry) => entry.code), ['SHOP_TARGET_UNVERIFIED']);
     assert.deepEqual(validateTargetCapability('shop', undefined, true), []);
-    assert.deepEqual(validateTargetCapability('unlockSecret').map((entry) => entry.code), ['UNLOCK_SECRET_UNSUPPORTED']);
-    assert.deepEqual(validateTargetCapability('regulationOverlay').map((entry) => entry.code), ['REGULATION_TARGET_UNSUPPORTED']);
+    assert.deepEqual(validateTargetCapability('unlockSecret').map((entry) => entry.code), ['UNLOCK_SECRET_UNVERIFIED']);
+    assert.deepEqual(validateTargetCapability('regulationTarget').map((entry) => entry.code), ['REGULATION_TARGET_UNSUPPORTED']);
   });
 
   it('requires explicit opt-in for fixture-backed assumed projections', () => {
@@ -26,7 +26,7 @@ describe('campaign YgoMaster target contract', () => {
     assert.deepEqual(validateTargetCapability('structure', undefined, true), []);
     assert.deepEqual(
       validateTargetCapabilities(['unlockSecret', 'shop', 'unlockSecret']).map((entry) => entry.code),
-      ['SHOP_TARGET_UNVERIFIED', 'UNLOCK_SECRET_UNSUPPORTED'],
+      ['SHOP_TARGET_UNVERIFIED', 'UNLOCK_SECRET_UNVERIFIED'],
     );
   });
 });

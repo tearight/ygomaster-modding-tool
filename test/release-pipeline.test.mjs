@@ -3,7 +3,7 @@ import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { discoverCliRuntimeDependencies, publishRelease, readReusableBuildState, runReleaseStages, writeBuildState } from '../scripts/release-pipeline.mjs';
+import { copyCliBuildOutput, discoverCliRuntimeDependencies, publishRelease, readReusableBuildState, runReleaseStages, writeBuildState } from '../scripts/release-pipeline.mjs';
 
 test('preflight failure occurs before Electron package and later release stages', async () => {
   const calls = [];
@@ -62,6 +62,24 @@ test('CLI runtime dependency discovery fails before packaging when a dependency 
     await fs.mkdir(dist, { recursive: true });
     await fs.writeFile(path.join(dist, 'index.js'), 'require("missing-runtime");');
     await assert.rejects(discoverCliRuntimeDependencies({ editorRoot: root, distCliRoot: dist }), /not installed: missing-runtime/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('portable CLI assembly preserves every compiled relative-import directory', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'release-cli-output-test-'));
+  try {
+    const distCliRoot = path.join(root, 'dist-cli');
+    const stagingRoot = path.join(root, 'release');
+    await fs.mkdir(path.join(distCliRoot, 'cli'), { recursive: true });
+    await fs.mkdir(path.join(distCliRoot, 'core'), { recursive: true });
+    await fs.mkdir(path.join(distCliRoot, 'common'), { recursive: true });
+    await fs.writeFile(path.join(distCliRoot, 'cli', 'index.js'), 'require("../core")');
+    await fs.writeFile(path.join(distCliRoot, 'core', 'index.js'), 'require("../common/shared")');
+    await fs.writeFile(path.join(distCliRoot, 'common', 'shared.js'), 'module.exports = true');
+    await copyCliBuildOutput({ distCliRoot, stagingRoot });
+    assert.equal(await fs.readFile(path.join(stagingRoot, 'common', 'shared.js'), 'utf8'), 'module.exports = true');
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

@@ -22,6 +22,14 @@ import {
 } from './ir-snapshot';
 import type { ContentManifest } from './layers';
 import type { JsonObject, Problem } from './types';
+import { validateRuntimePolicyPatch, type RuntimePolicyFamily } from './runtime-policy';
+import type { CardReferenceInput } from './card-resolver';
+import {
+  DECK_FOLDER_CATALOG_FILE,
+  parseDeckFolderCatalog,
+  resolveDeckIdentity,
+  type DeckFolderCatalog,
+} from './deck-organization';
 
 export const CONTENT_BUNDLE_CODES = Object.freeze({
   OPTIONS_INVALID: 'CONTENT_BUNDLE_OPTIONS_INVALID',
@@ -40,7 +48,14 @@ export const CONTENT_BUNDLE_CODES = Object.freeze({
   STRUCTURE_INVALID: 'CONTENT_BUNDLE_STRUCTURE_INVALID',
   DECK_INVALID: 'CONTENT_BUNDLE_DECK_INVALID',
   DECK_DUPLICATE: 'CONTENT_BUNDLE_DECK_DUPLICATE',
+  DECK_OUTPUT_DUPLICATE: 'CONTENT_BUNDLE_DECK_OUTPUT_DUPLICATE',
+  DECK_IDENTITY_INVALID: 'CONTENT_BUNDLE_DECK_IDENTITY_INVALID',
+  DECK_SIDECAR_MISSING: 'CONTENT_BUNDLE_DECK_SIDECAR_MISSING',
+  DECK_SIDECAR_AMBIGUOUS: 'CONTENT_BUNDLE_DECK_SIDECAR_AMBIGUOUS',
+  DECK_PATH_COLLISION: 'CONTENT_BUNDLE_DECK_PATH_COLLISION',
   SIDECAR_INVALID: 'CONTENT_BUNDLE_DECK_SIDECAR_INVALID',
+  SIDECAR_ORPHAN: 'CONTENT_BUNDLE_DECK_SIDECAR_ORPHAN',
+  DECK_FOLDER_CATALOG_INVALID: 'CONTENT_BUNDLE_DECK_FOLDER_CATALOG_INVALID',
   REGULATION_INVALID: 'CONTENT_BUNDLE_REGULATION_INVALID',
   REGULATION_DUPLICATE: 'CONTENT_BUNDLE_REGULATION_DUPLICATE',
   REGULATION_RULES_MISSING: 'CONTENT_BUNDLE_REGULATION_RULES_MISSING',
@@ -50,6 +65,8 @@ export const CONTENT_BUNDLE_CODES = Object.freeze({
   SHOP_INVALID: 'CONTENT_BUNDLE_SHOP_INVALID',
   SHOP_REFERENCE_INVALID: 'CONTENT_BUNDLE_SHOP_REFERENCE_INVALID',
   SHOP_REFERENCE_MISSING: 'CONTENT_BUNDLE_SHOP_REFERENCE_MISSING',
+  RUNTIME_POLICY_INVALID: 'CONTENT_BUNDLE_RUNTIME_POLICY_INVALID',
+  RELEASE_PRODUCT_INVALID: 'CONTENT_BUNDLE_RELEASE_PRODUCT_INVALID',
 } as const);
 
 export type ContentBundleCode = (typeof CONTENT_BUNDLE_CODES)[keyof typeof CONTENT_BUNDLE_CODES];
@@ -62,7 +79,12 @@ export interface BundleJsonSource<T = unknown> {
 }
 
 export interface CampaignDeckBundle {
+  /** Compatibility key retained for callers; based on stable identity, not source path. */
   key: string;
+  reference: string;
+  adapterPath: string;
+  identityOrigin: 'explicit' | 'legacy-flat';
+  aliases: string[];
   source: BundleJsonSource<string>;
   sidecar?: BundleJsonSource<JsonObject>;
   metadata?: JsonObject;
@@ -88,12 +110,17 @@ export interface DiscoveredCampaignIrBundle {
   gates: BundleJsonSource<JsonObject>[];
   structures: BundleJsonSource<JsonObject>[];
   decks: Record<string, CampaignDeckBundle>;
+  deckFolderSource?: BundleJsonSource<JsonObject>;
+  deckFolderCatalog?: DeckFolderCatalog;
   regulations: Record<string, CampaignRegulationBundle>;
   shops: CampaignShopBundle[];
+  releaseGraphs: BundleJsonSource<JsonObject>[];
+  /** Campaign-owned, allowlisted patches for runtime baseline files. */
+  runtimePolicy?: Record<string, JsonObject>;
   localization?: LocalizationCatalog;
   accessories?: BundleJsonSource<JsonObject>;
   gateBackgrounds: GateBackgroundAsset[];
-  cardReferences: Record<string, string>;
+  cardReferences: Record<string, CardReferenceInput>;
   /** Inputs deliberately left for compiler capability/partial-publish checks. */
   unconsumedPaths: string[];
   /** Compatibility spelling used by compiler callers. */
@@ -369,7 +396,50 @@ export const loadCampaignIrBundle = async (
   const assetsDirectory = sourceDirectory(manifest, 'assets', 'assets', root, problems);
   const shopDirectory = sourceDirectory(manifest, 'shop', 'shop', root, problems);
   const targetDirectory = sourceDirectory(manifest, 'target', 'target/ygomaster', root, problems);
+  const runtimePolicyDirectory = sourceDirectory(manifest, 'runtimePolicy', 'runtime-policy', root, problems);
+  const releaseDirectory = sourceDirectory(manifest, 'releases', 'releases', root, problems);
   void targetDirectory;
+
+  const releaseGraphs: BundleJsonSource<JsonObject>[] = [];
+  for (const relative of directFiles([...sources.keys()], releaseDirectory, '.json')) {
+    const source = sources.get(relative) as LoadedSource;
+    const value = parseStrictJson(source, problems);
+    consumed.add(relative);
+    const document = asJsonObject(value);
+    if (!document) problems.push(diagnostic(CONTENT_BUNDLE_CODES.RELEASE_PRODUCT_INVALID, 'Release/product graph must be a JSON object', relative));
+    else releaseGraphs.push({ sourcePath: relative, bytes: new Uint8Array(source.bytes), value: document });
+  }
+
+  const runtimePolicy: Record<string, JsonObject> = {};
+  const runtimePolicyFiles: Record<string, string> = {
+    settings: `${runtimePolicyDirectory}/settings.json`,
+    shop: `${runtimePolicyDirectory}/shop.json`,
+    client: `${runtimePolicyDirectory}/client.json`,
+  };
+  // This is authored documentation for the policy family, not an executable
+  // compiler input. Mark it consumed so the fail-closed untracked-input gate
+  // remains useful for actual policy files.
+  if (sources.has(`${runtimePolicyDirectory}/README.md`)) consumed.add(`${runtimePolicyDirectory}/README.md`);
+  for (const [key, relative] of Object.entries(runtimePolicyFiles)) {
+    const source = sources.get(relative);
+    if (!source) continue;
+    const value = parseStrictJson(source, problems);
+    const document = asJsonObject(value);
+    consumed.add(relative);
+    if (!document) {
+      problems.push(diagnostic(CONTENT_BUNDLE_CODES.RUNTIME_POLICY_INVALID, 'Runtime policy document must be a JSON object', relative));
+      continue;
+    }
+    const payload = isRecord(document.payload) ? document.payload : document;
+    if (!isRecord(payload)) {
+      problems.push(diagnostic(CONTENT_BUNDLE_CODES.RUNTIME_POLICY_INVALID, 'Runtime policy payload must be a JSON object', relative, '/payload'));
+      continue;
+    }
+    problems.push(...validateRuntimePolicyPatch(key as RuntimePolicyFamily, payload, relative)
+      .filter((entry) => entry.severity !== 'warning')
+      .map((entry) => ({ ...entry, code: entry.code === 'RUNTIME_POLICY_KEY_UNSUPPORTED' ? CONTENT_BUNDLE_CODES.RUNTIME_POLICY_INVALID : entry.code })));
+    runtimePolicy[key] = payload as JsonObject;
+  }
 
   const gates: BundleJsonSource<JsonObject>[] = [];
   for (const relative of directFiles([...sources.keys()], gateDirectory, '.json')) {
@@ -433,41 +503,110 @@ export const loadCampaignIrBundle = async (
   }
 
   const decks: Record<string, CampaignDeckBundle> = {};
-  const deckFiles = directFiles([...sources.keys()], deckDirectory, '.decklist');
-  const deckKeys = new Set<string>();
-  for (const relative of deckFiles) {
-    const key = relative.slice(deckDirectory.length + 1);
-    const identity = key.normalize('NFKC').toLocaleLowerCase('en-US');
-    if (deckKeys.has(identity)) {
-      problems.push(diagnostic(CONTENT_BUNDLE_CODES.DECK_DUPLICATE, `Duplicate deck output identity: ${key}`, relative));
-      continue;
+  const deckFolderPath = `${deckDirectory}/${DECK_FOLDER_CATALOG_FILE}`;
+  const deckFolderSource = sources.get(deckFolderPath);
+  let deckFolderDocument: BundleJsonSource<JsonObject> | undefined;
+  let deckFolderCatalog: DeckFolderCatalog | undefined;
+  if (deckFolderSource) {
+    const value = parseStrictJson(deckFolderSource, problems);
+    const document = asJsonObject(value);
+    consumed.add(deckFolderPath);
+    if (!document) {
+      problems.push(diagnostic(CONTENT_BUNDLE_CODES.DECK_FOLDER_CATALOG_INVALID, 'Deck folder catalog must be a JSON object', deckFolderPath));
+    } else {
+      deckFolderDocument = { sourcePath: deckFolderPath, bytes: new Uint8Array(deckFolderSource.bytes), value: document };
+      const parsed = parseDeckFolderCatalog(document, deckFolderPath);
+      problems.push(...parsed.problems);
+      deckFolderCatalog = parsed.catalog;
     }
-    deckKeys.add(identity);
+  }
+  const deckFiles = directFiles([...sources.keys()], deckDirectory, '.decklist');
+  const deckSidecarFiles = directFiles([...sources.keys()], deckDirectory, '.json')
+    .filter((relative) => relative !== deckFolderPath);
+  const sidecarsByPortableStem = new Map<string, string[]>();
+  for (const sidecarPath of deckSidecarFiles) {
+    const portable = sourceStem(sidecarPath, '.json').normalize('NFKC').toLocaleLowerCase('en-US');
+    sidecarsByPortableStem.set(portable, [...(sidecarsByPortableStem.get(portable) || []), sidecarPath].sort(compareOrdinal));
+  }
+  const deckKeys = new Set<string>();
+  const adapterPaths = new Set<string>();
+  const pairedSidecars = new Set<string>();
+  for (const relative of deckFiles) {
     const source = sources.get(relative) as LoadedSource;
     const stem = sourceStem(relative, '.decklist');
     const sidecarPath = `${stem}.json`;
+    const sidecarCandidates = sidecarsByPortableStem.get(stem.normalize('NFKC').toLocaleLowerCase('en-US')) || [];
+    if (sidecarCandidates.length > 1) {
+      problems.push(diagnostic(CONTENT_BUNDLE_CODES.DECK_SIDECAR_AMBIGUOUS, `Deck sidecar pairing is ambiguous: ${sidecarCandidates.join(', ')}`, relative));
+      consumed.add(relative);
+      for (const candidate of sidecarCandidates) consumed.add(candidate);
+      continue;
+    }
     const sidecarSource = sources.get(sidecarPath);
-    const deck: CampaignDeckBundle = {
-      key,
-      source: { sourcePath: relative, bytes: new Uint8Array(source.bytes), value: decodeText(source.bytes) },
-    };
     consumed.add(relative);
+    let sidecar: JsonObject | undefined;
+    let metadata: JsonObject | undefined;
+    let regulation: string | undefined;
     if (sidecarSource) {
+      pairedSidecars.add(sidecarPath);
+      consumed.add(sidecarPath);
       const value = parseStrictJson(sidecarSource, problems);
-      const sidecar = asJsonObject(value);
+      sidecar = asJsonObject(value);
       if (!sidecar) problems.push(diagnostic(CONTENT_BUNDLE_CODES.SIDECAR_INVALID, 'Deck sidecar must be a JSON object', sidecarPath));
       else {
-        deck.sidecar = { sourcePath: sidecarPath, bytes: new Uint8Array(sidecarSource.bytes), value: sidecar };
-        deck.metadata = isRecord(sidecar.metadata) ? sidecar.metadata as JsonObject : sidecar;
-        const regulation = sidecar.regulation ?? (isRecord(sidecar.payload) ? sidecar.payload.regulation : undefined);
-        if (regulation !== undefined) {
-          if (typeof regulation !== 'string' || !regulation.trim()) problems.push(diagnostic(CONTENT_BUNDLE_CODES.SIDECAR_INVALID, 'Deck sidecar regulation must be a non-empty string', sidecarPath, '/regulation'));
-          else deck.regulation = regulation;
+        const document = typeof sidecar.code === 'number' && isRecord(sidecar.res) ? sidecar.res as JsonObject : sidecar;
+        metadata = isRecord(document.metadata) ? document.metadata as JsonObject : document;
+        const rawRegulation = document.regulation ?? (isRecord(document.payload) ? document.payload.regulation : undefined);
+        if (rawRegulation !== undefined) {
+          if (typeof rawRegulation !== 'string' || !rawRegulation.trim()) problems.push(diagnostic(CONTENT_BUNDLE_CODES.SIDECAR_INVALID, 'Deck sidecar regulation must be a non-empty string', sidecarPath, '/regulation'));
+          else regulation = rawRegulation;
         }
-        consumed.add(sidecarPath);
       }
     }
+    const relativeWithinDecks = relative.slice(deckDirectory.length + 1);
+    const legacyFlatStem = path.posix.basename(relativeWithinDecks, '.decklist');
+    const identity = resolveDeckIdentity(metadata, { sourcePath: sidecarSource ? sidecarPath : relative, ...(legacyFlatStem ? { legacyFlatStem } : {}) });
+    if (identity.problems.length) {
+      problems.push(...identity.problems.map((entry) => ({ ...entry, code: CONTENT_BUNDLE_CODES.DECK_IDENTITY_INVALID })));
+      continue;
+    }
+    const identityKey = (identity.key as string).normalize('NFKC').toLocaleLowerCase('en-US');
+    if (deckKeys.has(identityKey)) {
+      problems.push(diagnostic(CONTENT_BUNDLE_CODES.DECK_DUPLICATE, `Duplicate stable Deck identity: ${identity.reference}`, relative));
+      continue;
+    }
+    deckKeys.add(identityKey);
+    const adapterIdentity = (identity.adapterPath as string).normalize('NFKC').toLocaleLowerCase('en-US');
+    if (adapterPaths.has(adapterIdentity)) {
+      problems.push(diagnostic(CONTENT_BUNDLE_CODES.DECK_OUTPUT_DUPLICATE, `Duplicate generated Deck adapter output: ${identity.adapterPath}`, relative));
+      continue;
+    }
+    adapterPaths.add(adapterIdentity);
+    const key = `${identity.key}.decklist`;
+    const deck: CampaignDeckBundle = {
+      key,
+      reference: identity.reference as string,
+      adapterPath: identity.adapterPath as string,
+      identityOrigin: identity.origin as 'explicit' | 'legacy-flat',
+      aliases: [...new Set([
+        key,
+        relative,
+        relativeWithinDecks,
+        sourceStem(relativeWithinDecks, '.decklist'),
+        `${deckDirectory}/${identity.key}.json`,
+      ])].sort(compareOrdinal),
+      source: { sourcePath: relative, bytes: new Uint8Array(source.bytes), value: decodeText(source.bytes) },
+      ...(sidecar && sidecarSource ? { sidecar: { sourcePath: sidecarPath, bytes: new Uint8Array(sidecarSource.bytes), value: sidecar } } : {}),
+      ...(metadata ? { metadata } : {}),
+      ...(regulation ? { regulation } : {}),
+    };
     decks[key] = deck;
+  }
+  for (const sidecarPath of deckSidecarFiles) {
+    if (!pairedSidecars.has(sidecarPath)) {
+      consumed.add(sidecarPath);
+      problems.push(diagnostic(CONTENT_BUNDLE_CODES.SIDECAR_ORPHAN, `Deck sidecar has no uniquely paired .decklist source: ${sidecarPath}`, sidecarPath));
+    }
   }
 
   const regulations: Record<string, CampaignRegulationBundle> = {};
@@ -579,13 +718,15 @@ export const loadCampaignIrBundle = async (
   }
 
   const rawCardReferences = manifest.cardReferences;
-  const cardReferences: Record<string, string> = {};
+  const cardReferences: Record<string, CardReferenceInput> = {};
   if (rawCardReferences !== undefined) {
-    if (!isRecord(rawCardReferences)) problems.push(diagnostic(CONTENT_BUNDLE_CODES.CARD_REFERENCES_INVALID, 'manifest.cardReferences must be a string map', 'manifest.json', '/cardReferences'));
+    if (!isRecord(rawCardReferences)) problems.push(diagnostic(CONTENT_BUNDLE_CODES.CARD_REFERENCES_INVALID, 'manifest.cardReferences must be a card-reference map', 'manifest.json', '/cardReferences'));
     else {
       for (const [key, value] of Object.entries(rawCardReferences).sort(([left], [right]) => compareOrdinal(left, right))) {
-        if (typeof value !== 'string' || !value.trim()) problems.push(diagnostic(CONTENT_BUNDLE_CODES.CARD_REFERENCES_INVALID, `Card reference must map to a non-empty string: ${key}`, 'manifest.json', `/cardReferences/${key}`));
-        else cardReferences[key] = value;
+        const validString = typeof value === 'string' && value.trim().length > 0;
+        const validObject = isRecord(value) && typeof value.name === 'string' && value.name.trim().length > 0 && isRecord(value.selector);
+        if (!validString && !validObject) problems.push(diagnostic(CONTENT_BUNDLE_CODES.CARD_REFERENCES_INVALID, `Card reference must be a non-empty name or { name, selector }: ${key}`, 'manifest.json', `/cardReferences/${key}`));
+        else cardReferences[key] = value as CardReferenceInput;
       }
     }
   }
@@ -599,8 +740,12 @@ export const loadCampaignIrBundle = async (
     gates: gates.sort((left, right) => compareOrdinal(left.sourcePath, right.sourcePath)),
     structures: structures.sort((left, right) => compareOrdinal(left.sourcePath, right.sourcePath)),
     decks: Object.fromEntries(Object.entries(decks).sort(([left], [right]) => compareOrdinal(left, right))),
+    ...(deckFolderDocument ? { deckFolderSource: deckFolderDocument } : {}),
+    ...(deckFolderCatalog ? { deckFolderCatalog } : {}),
     regulations: Object.fromEntries(Object.entries(regulations).sort(([left], [right]) => compareOrdinal(left, right))),
     shops: shops.sort((left, right) => compareOrdinal(left.metadata.sourcePath, right.metadata.sourcePath)),
+    releaseGraphs: releaseGraphs.sort((left, right) => compareOrdinal(left.sourcePath, right.sourcePath)),
+    ...(Object.keys(runtimePolicy).length ? { runtimePolicy } : {}),
     ...(localization ? { localization } : {}),
     ...(accessories ? { accessories } : {}),
     gateBackgrounds: gateBackgrounds.sort((left, right) => compareOrdinal(left.key, right.key)),

@@ -409,6 +409,7 @@ export interface CoreOperationProblem {
   };
   jsonPointer?: string;
   suggestion?: string;
+  details?: Record<string, unknown>;
 }
 
 export interface CoreOperationResult<T = unknown> {
@@ -438,10 +439,93 @@ export interface ContentRevealSourceRequest extends ContentPathsRequest {
   sourcePath: string;
 }
 
+export interface ContentDocumentRequest extends ContentPathsRequest {
+  sourcePath?: string;
+}
+
+export interface ContentDocumentMutationRequest extends ContentPathsRequest {
+  sourcePath: string;
+  operation: 'create' | 'update' | 'delete';
+  content?: string;
+  expectedContentGeneration: string;
+  confirmApply: boolean;
+}
+
+export interface ContentDeckPreviewRequest extends ContentPathsRequest {
+  sourcePath: string;
+  sections: import('./deck-authoring').DeckAuthoringSections;
+  expectedContentGeneration: string;
+}
+
+/** Reads the renderer-safe logical Deck folder/index projection. */
+export interface ContentDeckWorkspaceRequest extends ContentPathsRequest {}
+
+export interface ContentDeckFolderBootstrapAssignment {
+  sourcePath: string;
+  sidecarSourcePath?: string;
+  folderId: string;
+}
+
+export interface ContentGateFolderBootstrapAssignment {
+  sourcePath: string;
+  folderId: string;
+}
+
+/** Atomically initializes the catalog plus every existing Deck and Gate assignment. */
+export interface ContentDeckFoldersBootstrapRequest extends ContentPathsRequest {
+  catalog: Record<string, unknown>;
+  deckAssignments: ContentDeckFolderBootstrapAssignment[];
+  gateAssignments: ContentGateFolderBootstrapAssignment[];
+  expectedContentGeneration: string;
+  confirmApply: boolean;
+  previewSignature?: string;
+}
+export interface ContentShopDocumentDraft {
+  sourcePath: string;
+  content: string;
+}
+
+export interface ContentShopReadRequest extends ContentPathsRequest {
+  sourcePath: string;
+}
+
+export interface ContentShopMutationRequest extends ContentPathsRequest {
+  metadata: ContentShopDocumentDraft;
+  packList: ContentShopDocumentDraft;
+  odds: ContentShopDocumentDraft;
+  expectedContentGeneration: string;
+  confirmApply: boolean;
+}
+
+export interface ContentStructureMutationRequest extends ContentDocumentMutationRequest {}
+
+export interface ContentRegulationReadRequest extends ContentPathsRequest {
+  sourcePath: string;
+}
+
+export interface ContentRegulationMutationRequest extends ContentPathsRequest {
+  metadata: ContentShopDocumentDraft;
+  rules: ContentShopDocumentDraft;
+  operation: 'create' | 'update' | 'delete';
+  expectedContentGeneration: string;
+  confirmApply: boolean;
+}
+
+export interface ContentLocalizationAssetMutationRequest extends ContentDocumentMutationRequest {}
+
+export interface ContentRuntimePolicyRequest extends ContentPathsRequest {}
+export interface ContentRuntimePolicyWriteRequest extends ContentPathsRequest {
+  policy: Record<string, Record<string, unknown>>;
+  expectedContentGeneration: string;
+  confirmApply: boolean;
+}
+
 export interface ContentCompileRequest extends ContentPathsRequest {
-  /** Missing/false is check-only; apply requires both fields below. */
+  /** Missing/false is check-only; UI apply requires reviewed generations and confirmation. */
   apply?: boolean;
   expectedContentGeneration?: string;
+  expectedRegistryGeneration?: string;
+  expectedPlannedRegistryGeneration?: string;
   confirmApply?: boolean;
 }
 
@@ -450,10 +534,21 @@ export interface ContentDeployRequest extends ContentPathsRequest {
   gameRoot?: string;
   /** Only an explicitly reviewed legacy source may bypass generation checks. */
   allowLegacyIr?: boolean;
+  /** Explicit approval to copy an automatically selected compatible Local save. */
+  confirmSaveCarryover?: boolean;
 }
 
 export interface CorePathRequest {
   path: string;
+}
+
+export interface CampaignWorkspaceStatus {
+  state: 'ready' | 'workspace-required' | 'content-missing';
+  workspaceRoot?: string;
+  contentRoot: string;
+  irRoot: string;
+  registryPath: string;
+  gameRoot?: string;
 }
 
 export interface CatalogSearchRequest {
@@ -461,6 +556,82 @@ export interface CatalogSearchRequest {
   limit?: number;
 }
 
+export type CatalogServiceNumericField =
+  | 'availability'
+  | 'level'
+  | 'rank'
+  | 'link'
+  | 'scale'
+  | 'atk'
+  | 'def';
+
+export type CatalogServiceQueryExpression =
+  | { kind: 'all' }
+  | { kind: 'exact'; field: 'runtimeId' | 'ydkId' | 'name'; value: string | number; locale?: string }
+  | { kind: 'text'; field: 'name' | 'effect' | 'any'; value: string; mode: 'prefix' | 'text'; locale?: string }
+  | { kind: 'range'; field: CatalogServiceNumericField; gte?: number; gt?: number; lte?: number; lt?: number }
+  | { kind: 'facet'; namespace: string; key: string; operator: 'exact' | 'in' | 'not'; values: string[] }
+  | { kind: 'and' | 'or'; terms: CatalogServiceQueryExpression[] }
+  | { kind: 'not'; term: CatalogServiceQueryExpression };
+
+export interface CatalogServiceGetRequest {
+  runtimeId?: number;
+  ydkId?: string | number;
+  locale?: string;
+  /** Reject a result from a different selected generation. */
+  expectedGenerationId?: string;
+}
+
+export interface CatalogServiceQueryRequest {
+  expression: CatalogServiceQueryExpression;
+  locale?: string;
+  sort?: Array<{
+    field: 'runtimeId' | 'name' | CatalogServiceNumericField;
+    direction: 'asc' | 'desc';
+  }>;
+  offset?: number;
+  limit?: number;
+  /** Reject a result from a different selected generation. */
+  expectedGenerationId?: string;
+}
+
+export interface CatalogServiceCardSummary {
+  runtimeCardId: number;
+  availability: number;
+  lifecycleState: 'available' | 'unavailable' | 'tombstoned';
+  name: string | null;
+  locale: string | null;
+  ydkIds: string[];
+  mechanics: Record<string, number | null> | null;
+  image: null | {
+    provider: string;
+    requestedProviderId: string;
+    artifactProviderId: string;
+    imageSize: string;
+    status: string;
+    fallbackRuntimeCardId: number | null;
+    fallbackReason: string | null;
+  };
+}
+
+export interface CatalogServiceQueryResult {
+  generationId: string;
+  total: number;
+  offset: number;
+  limit: number;
+  cards: CatalogServiceCardSummary[];
+  catalogService: {
+    backend: 'service';
+    generationId: string;
+  };
+}
+
 export interface CatalogRefreshRequest {
   online?: boolean;
+  /** Required in addition to `online` so internet refresh cannot be triggered silently. */
+  confirmOnline?: boolean;
+  /** The reviewed resolver generation, or `missing` when no valid cache exists. */
+  expectedCatalogGeneration?: string;
+  /** Explicit acknowledgement that refresh replaces the local display/search cache. */
+  confirmRefresh?: boolean;
 }

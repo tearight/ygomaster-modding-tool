@@ -7,6 +7,7 @@ import {
   CONTRACT_VERSION,
   TOOL_VERSION,
   deployCampaign,
+  deployDiagnosticProjection,
   catalogEnvironmentSources,
   catalogCardIds,
   catalogSearch,
@@ -92,6 +93,7 @@ export const CLI_COMMAND_REGISTRY = [
   'trash restore',
   'campaign validate',
   'campaign deploy',
+  'diagnostic deploy-projection',
   'content inspect',
   'content resolve',
   'content validate',
@@ -192,7 +194,7 @@ const readMigrationCandidate = async (candidateRoot: string): Promise<SourceMigr
 };
 
 const usage = () =>
-  'Usage: node cli/index.js <command> [subcommand] [path] [--content path] [--ir path] [--registry path] [--check|--apply --expected-generation sha256] [--pretty]\nExamples: content inspect; content resolve; content validate; content compile --check; content compile --apply --expected-generation <sha256>; content diff; migration preview; migration apply --candidate <path> --accept --expected-source-generation <sha256> --expected-candidate-generation <sha256>';
+  'Usage: node cli/index.js <command> [subcommand] [path] [--content path] [--ir path] [--registry path] [--check|--apply --expected-generation sha256] [--pretty]\nExamples: content inspect; content resolve; content validate; content compile --check; content compile --apply --expected-generation <sha256>; content diff; campaign deploy --accept-save-carryover; migration preview; migration apply --candidate <path> --accept --expected-source-generation <sha256> --expected-candidate-generation <sha256>';
 
 const commandResult = async (parsed: ParsedArgs, projectRoot: string): Promise<OperationResult<unknown>> => {
   const config = await readConfig(projectRoot);
@@ -255,7 +257,12 @@ const commandResult = async (parsed: ParsedArgs, projectRoot: string): Promise<O
         if (parsed.options.get('allow-legacy-ir') !== true) {
           return failure([problem('IR_GENERATION_METADATA_MISSING', 'Managed deploy requires generation.json; use --allow-legacy-ir only for an explicitly reviewed legacy source')], 'COMMAND_FAILED');
         }
-        return deployCampaign({ projectRoot, sourceRoot: deploySourceRoot, gameRoot });
+        return deployCampaign({
+          projectRoot,
+          sourceRoot: deploySourceRoot,
+          gameRoot,
+          acceptSaveCarryover: parsed.options.get('accept-save-carryover') === true,
+        });
       }
       const contentRoot = path.resolve(optionString(parsed, 'content') || path.join(projectRoot, 'campaign', 'content'));
       const registryPath = path.resolve(optionString(parsed, 'registry') || path.join(projectRoot, 'campaign', 'id-registry.json'));
@@ -268,6 +275,7 @@ const commandResult = async (parsed: ParsedArgs, projectRoot: string): Promise<O
         sourceRoot: deploySourceRoot,
         gameRoot,
         requireGenerationMetadata: true,
+        acceptSaveCarryover: parsed.options.get('accept-save-carryover') === true,
         expectedGeneration: {
           contentGeneration: snapshot.snapshot.contentGeneration,
           compilerVersion: IR_COMPILER_VERSION,
@@ -277,6 +285,24 @@ const commandResult = async (parsed: ParsedArgs, projectRoot: string): Promise<O
         },
       });
     }
+  }
+  if (group === 'diagnostic' && action === 'deploy-projection') {
+    if (!gameRoot) return failure([problem('GAME_ROOT_REQUIRED', 'Configure game root before diagnostic projection deploy')], 'PATH_ERROR');
+    const projectionRoot = optionString(parsed, 'projection');
+    const profileId = optionString(parsed, 'profile');
+    const soloEnvelope = optionString(parsed, 'solo-envelope');
+    if (!projectionRoot) return failure([problem('USAGE', 'diagnostic deploy-projection requires --projection <path>')], 'USAGE_ERROR');
+    if (!profileId) return failure([problem('USAGE', 'diagnostic deploy-projection requires --profile <id>')], 'USAGE_ERROR');
+    if (soloEnvelope !== 'exact' && soloEnvelope !== 'preserve-runtime') {
+      return failure([problem('USAGE', 'diagnostic deploy-projection requires --solo-envelope exact|preserve-runtime')], 'USAGE_ERROR');
+    }
+    return deployDiagnosticProjection({
+      projectRoot,
+      projectionRoot: path.resolve(projectionRoot),
+      gameRoot,
+      profileId,
+      soloEnvelope,
+    });
   }
   if (group === 'content') {
     if (action === 'inspect') return inspectCampaignContent(contentOptions);

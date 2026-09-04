@@ -13,6 +13,7 @@ import {
   createCardResolver,
   loadCardResolver,
   normalizeCardName,
+  parseCardReferenceText,
   validateResolutionLock,
 } from '../src/core/card-resolver';
 import type { CardResolverOptions } from '../src/core/card-resolver';
@@ -136,6 +137,38 @@ describe('card name resolver', () => {
     assert.equal(unavailable.runtimeId, 1002);
     assert.deepEqual(problemCodes(unavailable.problems), [CARD_RESOLVER_CODES.RUNTIME_UNAVAILABLE]);
     assert.equal(unavailable.lockEntry, undefined);
+  });
+
+  it('resolves only reviewed runtime selectors and preserves selector meaning in generation locks', async () => {
+    const resolver = await fixtureResolver();
+    const selector = { runtimeId: 1004, provenance: 'official-ocg-db:fixture-1004', variant: 'reviewed-art-b' };
+    const selected = resolver.resolve({
+      sourceName: 'Ancient—Fairy Dragon',
+      selector,
+      sourcePath: 'shop/pools/variant.packlist',
+      sourceSpan: { line: 3, column: 1, endLine: 3, endColumn: 92 },
+    });
+    assert.equal(selected.ok, true, JSON.stringify(selected.problems));
+    assert.equal(selected.runtimeId, 1004);
+    assert.deepEqual(selected.lockEntry?.selector, selector);
+    const lock = resolver.resolveBatch([{ sourceName: 'Ancient Fairy Dragon', selector }]).lock;
+    assert.ok(lock);
+    assert.deepEqual(validateResolutionLock(resolver, lock), []);
+
+    const parsed = parseCardReferenceText('Ancient Fairy Dragon @runtime=1004 @provenance=official-ocg-db:fixture-1004 @variant=reviewed-art-b');
+    assert.deepEqual(parsed, { name: 'Ancient Fairy Dragon', selector });
+    assert.equal(resolver.resolve({ sourceName: parsed.name, selector: parsed.selector }).runtimeId, 1004);
+
+    const missingEvidence = resolver.resolve({ sourceName: 'Ancient Fairy Dragon', selector: { runtimeId: 1004, provenance: '' } });
+    assert.equal(missingEvidence.problems[0]?.code, CARD_RESOLVER_CODES.SELECTOR_INVALID);
+    const missingTarget = resolver.resolve({ sourceName: 'Ancient Fairy Dragon', selector: { runtimeId: 9999, provenance: 'fixture' } });
+    assert.equal(missingTarget.problems[0]?.code, CARD_RESOLVER_CODES.SELECTOR_TARGET_MISSING);
+    const mismatch = resolver.resolve({ sourceName: 'Blue-Eyes White Dragon', selector: { runtimeId: 1004, provenance: 'fixture' } });
+    assert.equal(mismatch.problems[0]?.code, CARD_RESOLVER_CODES.SELECTOR_NAME_MISMATCH);
+    assert.equal(mismatch.problems[0]?.sourceSpan, undefined);
+
+    const staleResolver = await fixtureResolver({ catalogGeneration: 'new-generation' });
+    assert.ok(validateResolutionLock(staleResolver, lock).some((problem) => problem.code === CARD_RESOLVER_CODES.LOCK_STALE_GENERATION));
   });
 
   it('orders batch results and locks deterministically independent of input order', async () => {

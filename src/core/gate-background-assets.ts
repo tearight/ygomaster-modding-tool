@@ -60,7 +60,7 @@ export const projectGateBackgrounds = (
   authoredGateRefs: readonly string[],
   assets: readonly GateBackgroundAsset[],
   registry: IdRegistry,
-): { overlay: Record<string, IrProjectionFile>; problems: Problem[] } => {
+): { target: Record<string, IrProjectionFile>; problems: Problem[] } => {
   const problems: Problem[] = [];
   const expected = new Set(authoredGateRefs);
   const assigned = new Map<string, GateBackgroundAsset>();
@@ -86,8 +86,8 @@ export const projectGateBackgrounds = (
   for (const reference of [...expected].sort()) {
     if (!assigned.has(reference)) problems.push(problem(GATE_BACKGROUND_CODES.MISSING, `Custom Solo Gate requires a background PNG: ${reference}`, 'assets/manifest.json'));
   }
-  const overlay: Record<string, IrProjectionFile> = {};
-  if (problems.length) return { overlay, problems };
+  const target: Record<string, IrProjectionFile> = {};
+  if (problems.length) return { target, problems };
   for (const [reference, asset] of assigned) {
     const key = gateKey(reference) as string;
     const assignment = registry.namespaces.gate.assignments[key];
@@ -95,7 +95,7 @@ export const projectGateBackgrounds = (
       problems.push(problem(GATE_BACKGROUND_CODES.REFERENCE_ORPHAN, `No target Gate ID was allocated for ${reference}`, asset.manifestSourcePath));
       continue;
     }
-    overlay[`ClientData/SoloGateBackgrounds/${assignment.id}.png`] = new Uint8Array(asset.bytes);
+    target[`Data/ClientData/SoloGateBackgrounds/${assignment.id}.png`] = new Uint8Array(asset.bytes);
   }
-  return { overlay, problems };
+  return { target, problems };
 };

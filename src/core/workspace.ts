@@ -46,7 +46,7 @@ export const inspectWorkspace = async (projectRoot: string, sourceRootInput?: st
       manifest,
       sourceRoot: paths.sourceRoot,
       counts,
-      paths: { gateRoot: paths.gateRoot, deckRoot: paths.deckRoot, structureRoot: paths.structureRoot, overlayRoot: paths.overlayRoot },
+      paths: { gateRoot: paths.gateRoot, deckRoot: paths.deckRoot, structureRoot: paths.structureRoot, targetRoot: paths.targetRoot },
     };
     const errors = manifestProblems.filter((entry) => entry.severity !== 'warning');
     return errors.length ? failure(errors, 'COMMAND_FAILED') : result(data, manifestProblems.filter((entry) => entry.severity === 'warning'));

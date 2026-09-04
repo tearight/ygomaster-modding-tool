@@ -29,8 +29,10 @@ export interface IdRange {
  * still unsupported by the YgoMaster target contract.
  */
 export const ID_NAMESPACE_RANGES: Readonly<Record<RegistryNamespace, IdRange>> = Object.freeze({
-  gate: Object.freeze({ min: 90000, max: 90999 }),
-  chapter: Object.freeze({ min: 900000001, max: 909999999 }),
+  // Keep custom Solo gates in the compact range used by established mods.
+  // Chapter IDs remain the official gate*10000+local composite.
+  gate: Object.freeze({ min: 100, max: 2101 }),
+  chapter: Object.freeze({ min: 1000001, max: 21019999 }),
   reward: Object.freeze({ min: 910000, max: 910999 }),
   unlock: Object.freeze({ min: 911000, max: 911999 }),
   structure: Object.freeze({ min: 1129000, max: 1129999 }),
@@ -129,6 +131,35 @@ export interface RegistryApplyResult {
   generation: string;
   registry: IdRegistry;
   diff: RegistryDiff[];
+}
+
+export interface RegistryReviewChapterComposite {
+  gateKey?: string;
+  gateId: number;
+  localId: number;
+  id: number;
+  expression: string;
+}
+
+export interface RegistryReviewChange extends RegistryDiff {
+  dependentKeys: string[];
+  beforeChapter?: RegistryReviewChapterComposite;
+  afterChapter?: RegistryReviewChapterComposite;
+}
+
+export interface RegistryNamespaceReview {
+  namespace: RegistryNamespace;
+  range: IdRange;
+  assignmentCount: number;
+  tombstoneCount: number;
+  changes: RegistryReviewChange[];
+}
+
+export interface RegistryReview {
+  baseGeneration: string;
+  plannedGeneration: string;
+  changeCount: number;
+  namespaces: RegistryNamespaceReview[];
 }
 
 export interface RegistryMigrationEndpoint {
@@ -613,6 +644,57 @@ export const diffRegistry = (before: IdRegistry, after: IdRegistry): RegistryDif
     }
   }
   return diff;
+};
+
+const reviewChapter = (assignment: RegistryAssignment | undefined): RegistryReviewChapterComposite | undefined => {
+  if (!assignment) return undefined;
+  const parts = chapterParts(assignment.id);
+  return {
+    ...(typeof assignment.gateKey === 'string' ? { gateKey: assignment.gateKey } : {}),
+    gateId: parts.gateId,
+    localId: parts.localId,
+    id: assignment.id,
+    expression: `${parts.gateId} × 10000 + ${parts.localId} = ${assignment.id}`,
+  };
+};
+
+const reviewDependents = (registry: IdRegistry, namespace: RegistryNamespace, key: string, id: number | undefined): string[] => {
+  if (namespace !== 'gate' || id === undefined) return [];
+  return dependentChapterKeys(registry, key, id);
+};
+
+/** Renderer-safe explanation of a core-owned plan; the candidate registry is never accepted back from the UI. */
+export const reviewRegistryPlan = (beforeInput: IdRegistry, afterInput: IdRegistry): RegistryReview => {
+  const before = parseRegistry(beforeInput);
+  const after = parseRegistry(afterInput);
+  const changes = diffRegistry(before, after);
+  return {
+    baseGeneration: before.generation,
+    plannedGeneration: after.generation,
+    changeCount: changes.length,
+    namespaces: ID_REGISTRY_NAMESPACE_ORDER.map((namespace) => {
+      const state = after.namespaces[namespace];
+      return {
+        namespace,
+        range: { ...state.range },
+        assignmentCount: Object.keys(state.assignments).length,
+        tombstoneCount: Object.keys(state.tombstones).length,
+        changes: changes.filter((entry) => entry.namespace === namespace).map((entry) => {
+          const beforeAssignment = before.namespaces[namespace].assignments[entry.key];
+          const afterAssignment = after.namespaces[namespace].assignments[entry.key];
+          return {
+            ...entry,
+            dependentKeys: [...new Set([
+              ...reviewDependents(before, namespace, entry.key, entry.before),
+              ...reviewDependents(after, namespace, entry.key, entry.after),
+            ])].sort(),
+            ...(namespace === 'chapter' && beforeAssignment ? { beforeChapter: reviewChapter(beforeAssignment) } : {}),
+            ...(namespace === 'chapter' && afterAssignment ? { afterChapter: reviewChapter(afterAssignment) } : {}),
+          };
+        }),
+      };
+    }),
+  };
 };
 
 export const planRegistry = (

@@ -714,7 +714,7 @@ const resolveProjectionText = (
 const chapterRuntimeId = (gateId: number, chapterId: number): number =>
   chapterId > 0 && chapterId < 10000 ? gateId * 10000 + chapterId : chapterId;
 
-/** Generate only the documented additive Solo localization/card projections. */
+/** Generate only the documented Solo localization/card target projections. */
 export const generateSoloLocalizationProjection = (
   input: SoloLocalizationProjectionInput,
   catalog: LocalizationCatalog,

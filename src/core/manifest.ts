@@ -16,9 +16,10 @@ export const defaultManifest = (): SourceManifest => ({
     gate: 'gate',
     deck: 'deck',
     structure: 'structure',
+    target: 'target/ygomaster',
   },
   authoring: { language: 'Korean' },
-  idPolicy: { gatePrefix: 90000, structurePrefix: 1129000 },
+  idPolicy: { gatePrefix: 100, structurePrefix: 1129000 },
   runtime: { repository: 'pixeltris/YgoMaster', channel: 'latest', autoDownload: true },
 });
 
@@ -33,7 +34,7 @@ export const getWorkspacePaths = (projectRoot: string, sourceRootInput?: string,
     gateRoot: resolveInside(sourceRoot, getDirectory(manifest || defaultManifest(), 'gate', 'gate')),
     deckRoot: resolveInside(sourceRoot, getDirectory(manifest || defaultManifest(), 'deck', 'deck')),
     structureRoot: resolveInside(sourceRoot, getDirectory(manifest || defaultManifest(), 'structure', 'structure')),
-    overlayRoot: resolveInside(sourceRoot, getDirectory(manifest || defaultManifest(), 'overlay', 'overlay')),
+    targetRoot: resolveInside(sourceRoot, getDirectory(manifest || defaultManifest(), 'target', 'target/ygomaster')),
     assetsRoot: resolveInside(sourceRoot, getDirectory(manifest || defaultManifest(), 'assets', 'assets')),
     trashRoot: resolveInside(sourceRoot, '.trash'),
   };
@@ -69,8 +70,8 @@ export const validateManifest = (manifest: SourceManifest): Problem[] => {
   if (typeof manifest.authoring?.language !== 'string' || !manifest.authoring.language) {
     problems.push(problem('MANIFEST_AUTHORING_MISSING', 'manifest.authoring.language is required', 'manifest.json:authoring.language'));
   }
-  if (manifest.idPolicy?.gatePrefix !== 90000 || manifest.idPolicy?.structurePrefix !== 1129000) {
-    problems.push(problem('MANIFEST_ID_POLICY_INVALID', 'manifest.idPolicy must use gatePrefix 90000 and structurePrefix 1129000', 'manifest.json:idPolicy'));
+  if (manifest.idPolicy?.gatePrefix !== 100 || manifest.idPolicy?.structurePrefix !== 1129000) {
+    problems.push(problem('MANIFEST_ID_POLICY_INVALID', 'manifest.idPolicy must use gatePrefix 100 and structurePrefix 1129000', 'manifest.json:idPolicy'));
   }
   if (manifest.runtime?.repository !== 'pixeltris/YgoMaster' || manifest.runtime.channel !== 'latest' || typeof manifest.runtime.autoDownload !== 'boolean') {
     problems.push(problem('MANIFEST_RUNTIME_INVALID', 'manifest.runtime must declare pixeltris/YgoMaster latest and autoDownload', 'manifest.json:runtime'));
@@ -84,7 +85,7 @@ export const initWorkspace = async (projectRoot: string, sourceRootInput?: strin
   const manifestPath = path.join(sourceRoot, MANIFEST_FILE);
   const manifest = (await exists(manifestPath)) ? await loadManifest(sourceRoot) : defaultManifest();
   const paths = getWorkspacePaths(projectRoot, sourceRoot, manifest);
-  await Promise.all([paths.gateRoot, paths.deckRoot, paths.structureRoot, paths.overlayRoot, paths.assetsRoot].map(ensureDirectory));
+  await Promise.all([paths.gateRoot, paths.deckRoot, paths.structureRoot, paths.targetRoot, paths.assetsRoot].map(ensureDirectory));
   if (!(await exists(manifestPath))) await atomicWriteJson(manifestPath, manifest, false);
   return { paths, manifest };
 };

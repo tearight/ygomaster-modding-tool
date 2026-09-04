@@ -265,7 +265,7 @@ describe('YgoMaster JSON compatibility', () => {
     assert.deepEqual(secondGate.chapters[0].unlock_pack, [1234, 5678]);
   });
 
-  it('handles upstream gates without chapter groups and overlays a custom gate', async () => {
+  it('handles upstream gates without chapter groups and replaces a custom gate', async () => {
     const { dataPath, filesPath } = await createFixture();
     const soloPath = path.join(dataPath, 'Solo.json');
     const sourceSolo = JSON.parse(await readFile(soloPath, 'utf8')) as {
@@ -307,7 +307,7 @@ describe('YgoMaster JSON compatibility', () => {
       unknown
     >;
     customGate.id = 99;
-    customGate.name = 'Custom overlay';
+    customGate.name = 'Custom replacement';
     customGate.priority = 99;
     customGate.clear_chapter = { gateId: 99, chapterId: 1 };
     const customChapter = JSON.parse(

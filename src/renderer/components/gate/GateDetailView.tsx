@@ -188,7 +188,7 @@ export const GateDetailView = ({
   const classes = useStyles();
 
   const defaultValuesForCreation = useMemo(() => {
-    // Campaign gates use the additive 90000-90999 range.
+    // Campaign gates use the project-owned 100-999 range.
     const id = Math.max(...gates.map(({ id }) => id), 90000) + 1;
     const priority = Math.max(...gates.map(({ priority }) => priority), 0) + 1;
     const clear_chapter = { gateId: id, chapterId: 0 };

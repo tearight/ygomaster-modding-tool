@@ -14,7 +14,7 @@ import type { DeckRegulationContext, DeckRegulationHook } from './deck-content';
 import { validateTargetCapability } from './target-contract';
 import type { JsonObject, Problem } from './types';
 
-/** Regulation is authored content; YgoMaster's Regulation overlay remains closed. */
+/** Regulation is authored content; YgoMaster Regulation target publication remains closed. */
 export const REGULATION_CONTENT_FORMAT_VERSION = 1 as const;
 export const REGULATION_CONTENT_KIND = 'regulation' as const;
 export const REGULATION_RULES_PARSER_VERSION = 1 as const;
@@ -651,7 +651,7 @@ export const createRegulationDeckHook = createDeckRegulationHook;
 export const createRegulationHook = createDeckRegulationHook;
 
 /**
- * Content legality is useful for review, but regulation overlay deployment is
+ * Content legality is useful for review, but Regulation target deployment is
  * intentionally blocked until the target contract is explicitly opened.
  */
 export const compileRegulationContent = (
@@ -659,7 +659,7 @@ export const compileRegulationContent = (
   options?: RegulationValidationOptions | CardNameResolver,
 ): RegulationTargetCompileResult => {
   const validation = validateRegulationContent(input, options);
-  const targetProblems = validateTargetCapability('regulationOverlay', input.metadataSourcePath);
+  const targetProblems = validateTargetCapability('regulationTarget', input.metadataSourcePath);
   const blocking = targetProblems.length
     ? targetProblems
     : [diagnostic(REGULATION_CODES.TARGET_UNSUPPORTED, 'Regulation target deployment is unsupported under the campaign target contract', input.metadataSourcePath)];

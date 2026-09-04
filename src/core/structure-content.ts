@@ -29,7 +29,8 @@ import {
   RegistryPlan,
   planRegistry,
 } from './id-registry';
-import type { CardNameResolver } from './card-resolver';
+import { cardReferenceRequest } from './card-resolver';
+import type { CardNameResolver, CardReferenceInput, CardReferenceSelector } from './card-resolver';
 import {
   LocalizationCatalog,
   normalizeLocalizationKey,
@@ -100,10 +101,10 @@ export interface StructureDefinition {
   deckRef?: string;
   decklist?: string;
   decklistRef?: string;
-  focus?: string | string[];
-  focusCard?: string | string[];
-  focusCardName?: string | string[];
-  focusCards?: string | string[];
+  focus?: CardReferenceInput | CardReferenceInput[];
+  focusCard?: CardReferenceInput | CardReferenceInput[];
+  focusCardName?: CardReferenceInput | CardReferenceInput[];
+  focusCards?: CardReferenceInput | CardReferenceInput[];
   accessory?: string | StructureAccessory | JsonObject;
   accessoryRef?: string;
   focusRarity?: number;
@@ -189,6 +190,7 @@ export interface StructureFocusResolution {
   normalizedName?: string;
   runtimeId?: number;
   matchKind?: 'exact' | 'alias';
+  selector?: CardReferenceSelector;
 }
 
 export interface StructureTargetCapability {
@@ -382,27 +384,29 @@ type StructureFocusField = 'focus' | 'focusCard' | 'focusCardName' | 'focusCards
 interface StructureFocusInput {
   field: StructureFocusField;
   count: number;
-  entries: Array<{ sourceName: string; sourceIndex: number }>;
+  entries: Array<{ sourceName: string; sourceIndex: number; selector?: CardReferenceSelector }>;
 }
 
 const focusNamesOf = (definition: StructureDefinition): StructureFocusInput => {
   const fields: StructureFocusField[] = ['focus', 'focusCard', 'focusCardName', 'focusCards'];
   const field = fields.find((candidate) => definition[candidate] !== undefined) || 'focus';
   const value = definition[field];
-  if (Array.isArray(value)) {
+  const values = Array.isArray(value) ? value : value === undefined ? [] : [value];
+  if (values.length) {
     return {
       field,
-      count: value.length,
-      entries: value.flatMap((entry, sourceIndex) => typeof entry === 'string' && entry.trim()
-        ? [{ sourceName: entry.trim(), sourceIndex }]
-        : []),
+      count: values.length,
+      entries: values.map((entry, sourceIndex) => {
+        const request = cardReferenceRequest(entry as CardReferenceInput);
+        return {
+          sourceName: request.sourceName || '',
+          sourceIndex,
+          ...(request.selector ? { selector: request.selector } : {}),
+        };
+      }),
     };
   }
-  return {
-    field,
-    count: typeof value === 'string' && value.trim() ? 1 : 0,
-    entries: typeof value === 'string' && value.trim() ? [{ sourceName: value.trim(), sourceIndex: 0 }] : [],
-  };
+  return { field, count: 0, entries: [] };
 };
 
 const accessoryValueOf = (definition: StructureDefinition): unknown => definition.accessoryRef ?? definition.accessory;
@@ -727,9 +731,9 @@ const compileParsedStructure = async (
   else if (focusInput.count > focusMax) problems.push(diagnostic(STRUCTURE_CODES.FOCUS_MAX, `Structure focus supports at most ${focusMax} cards`, sourcePath, undefined, `/payload/${focusInput.field}`));
   if (!Number.isSafeInteger(focusRarity) || focusRarity < 0) problems.push(diagnostic(STRUCTURE_CODES.FOCUS_RARITY_INVALID, 'Structure focus rarity must be a non-negative safe integer', sourcePath, undefined, '/payload/focusRarity'));
   const seenFocusIds = new Set<number>();
-  for (const { sourceName, sourceIndex } of focusNames) {
+  for (const { sourceName, sourceIndex, selector } of focusNames) {
     const focusPointer = `/payload/${focusInput.field}/${sourceIndex}`;
-    const resolution = resolver.resolve({ sourceName, sourcePath, jsonPointer: focusPointer });
+    const resolution = resolver.resolve({ sourceName, sourcePath, jsonPointer: focusPointer, ...(selector ? { selector } : {}) });
     problems.push(...resolution.problems);
     if (!resolution.ok || resolution.runtimeId === undefined) continue;
     if (seenFocusIds.has(resolution.runtimeId)) {
@@ -744,6 +748,7 @@ const compileParsedStructure = async (
       ...(resolution.normalizedName ? { normalizedName: resolution.normalizedName } : {}),
       runtimeId: resolution.runtimeId,
       ...(resolution.lockEntry?.matchKind ? { matchKind: resolution.lockEntry.matchKind } : {}),
+      ...(resolution.lockEntry?.selector ? { selector: clone(resolution.lockEntry.selector) } : {}),
     });
   }
   if (deckIr) {

@@ -26,6 +26,7 @@ import {
 } from './localization-content';
 import type { JsonObject, JsonValue, Problem } from './types';
 import { YGOMASTER_TARGET_CONTRACT_VERSION } from './layers';
+import { normalizeDeckFolderReference } from './deck-organization';
 
 /** Authored Gate/Chapter content is deliberately separate from Solo.json. */
 export const GATE_CONTENT_FORMAT_VERSION = 1 as const;
@@ -85,6 +86,7 @@ export const GATE_CONTENT_CODES = Object.freeze({
   UNLOCK_GRAPH_CYCLE: 'UNLOCK_GRAPH_CYCLE',
   UNLOCK_CHAPTER_TARGET_MISSING: 'UNLOCK_CHAPTER_TARGET_MISSING',
   UNLOCK_SECRET_UNSUPPORTED: 'UNLOCK_SECRET_UNSUPPORTED',
+  UNLOCK_SECRET_TARGET_ID_MISSING: 'UNLOCK_SECRET_TARGET_ID_MISSING',
   DUEL_INVALID: 'DUEL_INVALID',
   DUEL_CPU_DECK_MISSING: 'DUEL_CPU_DECK_MISSING',
   DUEL_RENTAL_DECK_MISSING: 'DUEL_RENTAL_DECK_MISSING',
@@ -170,6 +172,8 @@ export interface GateChapterDefinition {
   duel?: GateDuelDefinition;
   rewards: GateRewardDefinition[];
   unlock?: GateUnlockDefinition;
+  /** TCG compatibility extension: symbolic Shop packs opened by this Chapter. */
+  unlockSecrets?: string[];
   target?: GateTargetExtension;
   sourceIndex: number;
 }
@@ -177,6 +181,8 @@ export interface GateChapterDefinition {
 export interface GateDefinition {
   id: string;
   key: string;
+  /** Authoring-only scope; never emitted to Modding Tool IR or YgoMaster Data. */
+  deckFolder?: string;
   /** Optional symbolic hook consumed by regulation/deck validation orchestration. */
   regulation?: string;
   priority: number;
@@ -224,6 +230,8 @@ export interface GateValidationOptions {
   deckReferences?: readonly string[];
   /** Resolved deck projections required by the Gate/Duel compiler. */
   deckProjections?: ReadonlyMap<string, DeckIR> | Record<string, DeckIR>;
+  /** Authored deck identity to generated legacy adapter path. */
+  deckOutputReferences?: ReadonlyMap<string, string> | Record<string, string>;
 }
 
 export interface GateValidationResult {
@@ -241,6 +249,8 @@ export interface GateCompileOptions extends GateValidationOptions {
   cardIds?: ReadonlyMap<string, number> | Record<string, number>;
   /** Optional symbolic structure IDs; otherwise the existing ID registry is consulted. */
   structureIds?: ReadonlyMap<string, number> | Record<string, number>;
+  /** Symbolic Shop pack identities resolved by the collection compiler. */
+  shopIds?: ReadonlyMap<string, number> | Record<string, number>;
   /** If true, do not attempt to allocate new target IDs. */
   requireExistingIds?: boolean;
 }
@@ -266,7 +276,7 @@ export interface GateCompileIR {
   };
   /** Target-compatible Duel files keyed by composite chapter ID. */
   duels: Record<string, JsonObject>;
-  /** Source files accepted by the existing additive overlay adapter. */
+  /** Source files accepted by the YgoMaster Data materializer. */
   sourceFiles: Record<string, JsonObject>;
   /** Symbolic-to-numeric reward projection for review. */
   rewardItems: Record<string, GateRewardTargetItem[]>;
@@ -701,7 +711,7 @@ const parseChapter = (
   const problems = unknownKeys(raw, [
     'id', 'kind', 'type', 'parent', 'parentRef', 'required', 'entry', 'descriptionKey', 'descriptionRef', 'nameKey', 'nameRef', 'localization',
     'duel', 'cpuDeck', 'cpu_deck', 'rentalDeck', 'rental_deck', 'playerDeck', 'player_deck', 'playerMode', 'player_mode', 'playerNameKey', 'cpuNameKey',
-    'rewards', 'reward', 'rewardId', 'unlock', 'unlocks', 'packUnlock', 'packUnlocks', 'unlockPack', 'target',
+    'rewards', 'reward', 'rewardId', 'unlock', 'unlocks', 'packUnlock', 'packUnlocks', 'unlockPack', 'unlockSecrets', 'unlockSecretRefs', 'target',
   ], GATE_CONTENT_CODES.CHAPTER_FIELD_UNKNOWN, sourcePath, jsonPointer);
   const idRaw = raw.id;
   const id = normalizeSymbolic(
@@ -761,6 +771,21 @@ const parseChapter = (
   if (ygoTarget && ['unlock_secret', 'unlock_pack', 'unlockSecrets', 'secretType', 'secret_type', 'unlock_secrets'].some((key) => Object.prototype.hasOwnProperty.call(ygoTarget, key))) {
     problems.push(diagnostic(GATE_CONTENT_CODES.UNLOCK_SECRET_UNSUPPORTED, 'target.ygomaster pack unlock fields are unsupported by the current target contract', sourcePath, pointer(jsonPointer, 'target/ygomaster')));
   }
+  const unlockSecrets: string[] = [];
+  const rawUnlockSecrets = raw.unlockSecrets ?? raw.unlockSecretRefs;
+  if (rawUnlockSecrets !== undefined) {
+    if (kind !== 'duel') problems.push(diagnostic(GATE_CONTENT_CODES.DUEL_INVALID, 'unlockSecrets is supported only on Duel chapters', sourcePath, pointer(jsonPointer, 'unlockSecrets')));
+    referenceValues(rawUnlockSecrets).forEach((value, secretIndex) => {
+      const parsed = normalizeAnyReference(value, sourcePath, pointer(`${jsonPointer}/unlockSecrets`, secretIndex));
+      problems.push(...parsed.problems);
+      if (!parsed.value) return;
+      if (parsed.namespace !== 'shop') {
+        problems.push(diagnostic(GATE_CONTENT_CODES.UNLOCK_REF_INVALID, 'unlockSecrets references must use the shop: namespace', sourcePath, pointer(`${jsonPointer}/unlockSecrets`, secretIndex)));
+        return;
+      }
+      if (!unlockSecrets.includes(parsed.value)) unlockSecrets.push(parsed.value);
+    });
+  }
   if (problems.length) return { problems };
   const chapter: GateChapterDefinition = {
     id: id.value || '',
@@ -774,6 +799,7 @@ const parseChapter = (
     ...(duel.value ? { duel: duel.value } : {}),
     rewards: rewards.value.map((reward) => rewardKey && !reward.rewardKey ? { ...reward, rewardKey } : reward),
     ...(unlock.value ? { unlock: unlock.value } : {}),
+    ...(unlockSecrets.length ? { unlockSecrets } : {}),
     ...(target.value ? { target: target.value } : {}),
     sourceIndex: index,
   };
@@ -787,7 +813,7 @@ const parseGateDefinition = (
   if (!isRecord(payload)) return { problems: [diagnostic(GATE_CONTENT_CODES.ENVELOPE_INVALID, 'Gate payload must be an object', sourcePath, '/payload')] };
   const problems = unknownKeys(payload, [
     'id', 'nameKey', 'nameRef', 'descriptionKey', 'descriptionRef', 'localization', 'priority', 'parent', 'parentRef', 'parentGate', 'view', 'viewRef', 'viewGate',
-    'goal', 'goalChapter', 'clearChapter', 'regulation', 'unlock', 'packUnlock', 'packUnlocks', 'unlockPack', 'chapters', 'target',
+    'goal', 'goalChapter', 'clearChapter', 'regulation', 'deckFolder', 'unlock', 'packUnlock', 'packUnlocks', 'unlockPack', 'chapters', 'target',
   ], GATE_CONTENT_CODES.FIELD_UNKNOWN, sourcePath, '/payload');
   const id = normalizeSymbolic(
     payload.id,
@@ -827,6 +853,10 @@ const parseGateDefinition = (
   } else problems.push(diagnostic(GATE_CONTENT_CODES.GOAL_MISSING, 'Gate goal chapter is required', sourcePath, '/payload/goal'));
   const regulation = parseRegulationReference(payload.regulation, sourcePath, '/payload/regulation');
   problems.push(...regulation.problems);
+  const deckFolder = payload.deckFolder === undefined
+    ? { problems: [] as Problem[] }
+    : normalizeDeckFolderReference(payload.deckFolder, sourcePath, '/payload/deckFolder');
+  problems.push(...deckFolder.problems);
   const unlock = parseUnlockDefinition(payload.unlock, sourcePath, '/payload/unlock');
   problems.push(...unlock.problems);
   const packUnlock = parseUnlockDefinition(payload.packUnlock ?? payload.packUnlocks ?? payload.unlockPack, sourcePath, '/payload/packUnlock');
@@ -857,6 +887,7 @@ const parseGateDefinition = (
     value: {
       id: id.value || '',
       key: id.key || '',
+      ...(deckFolder.value ? { deckFolder: deckFolder.value } : {}),
       ...(regulation.value ? { regulation: regulation.value } : {}),
       priority: priority as number,
       nameKey: name.value as GateLocalizationReference,
@@ -1171,6 +1202,15 @@ const projectionLookup = (value: ReadonlyMap<string, DeckIR> | Record<string, De
   return record[ref] ?? record[key] ?? record[ref.replace(/^[^:]+:/u, '')];
 };
 
+const outputDeckReference = (
+  value: ReadonlyMap<string, string> | Record<string, string> | undefined,
+  ref: string,
+): string => {
+  if (!value) return ref;
+  if (value instanceof Map) return value.get(ref) || ref;
+  return (value as Record<string, string>)[ref] || ref;
+};
+
 const deckProjectionIssue = (projection: DeckIR | undefined): 'invalid' | 'empty' | 'length-mismatch' | undefined => {
   if (!projection || !isRecord(projection)) return 'invalid';
   const parts = ['m', 'e', 's'] as const;
@@ -1239,6 +1279,14 @@ const mergeTarget = (
   if (Object.prototype.hasOwnProperty.call(base, 'begin_sn')) merged.begin_sn = '';
   return merged;
 };
+
+// YgoMaster's client groups Solo gates by this field.  The upstream server
+// backfills category=1 when it is absent, but the client-facing runtime
+// contract treats a missing category as an invisible gate.  Keep generated
+// output explicit and allow an authored target extension to override it (for
+// example, category=2 for the Challenges/Training tab used by other mods).
+const SOLO_STORIES_CATEGORY = 1;
+const SOLO_OPEN_DATE_EPOCH = -2208988800;
 
 const localizationText = (
   reference: GateLocalizationReference | undefined,
@@ -1427,7 +1475,9 @@ export const compileGateContent = (
       parent_gate: parentId,
       view_gate: viewId,
       priority: gate.priority,
-    clear_chapter: goalId || 0,
+      clear_chapter: goalId || 0,
+      category: SOLO_STORIES_CATEGORY,
+      open_date: SOLO_OPEN_DATE_EPOCH,
       name: gateText.value,
       description: gateDescription.value,
     }, gate.target);
@@ -1481,6 +1531,12 @@ export const compileGateContent = (
         begin_sn: '',
         npc_id: chapter.kind === 'duel' ? 1 : 0,
       }, chapter.target);
+      const unlockSecretIds = (chapter.unlockSecrets || []).map((reference) => mapLookup(options.shopIds, reference));
+      if (unlockSecretIds.some((id) => targetNumber(id) === undefined)) {
+        compileProblems.push(diagnostic(GATE_CONTENT_CODES.UNLOCK_SECRET_TARGET_ID_MISSING, `No Shop target ID was supplied for ${chapter.unlockSecrets?.find((_, index) => targetNumber(unlockSecretIds[index]) === undefined) || 'unlock secret'}`));
+      } else if (unlockSecretIds.length) {
+        chapterRecord.unlock_secret = (unlockSecretIds as number[]).join(' ');
+      }
       chaptersForGate[String(chapterId)] = chapterRecord;
       const sourceChapter = mergeTarget({
         id: chapterId % 10000,
@@ -1496,9 +1552,10 @@ export const compileGateContent = (
         sourceChapter.begin_sn = '';
       }
       if (chapter.duel) {
-        sourceChapter.cpu_deck = chapter.duel.cpuDeck;
-        if (chapter.duel.rentalDeck) sourceChapter.rental_deck = chapter.duel.rentalDeck;
+        sourceChapter.cpu_deck = outputDeckReference(options.deckOutputReferences, chapter.duel.cpuDeck);
+        if (chapter.duel.rentalDeck) sourceChapter.rental_deck = outputDeckReference(options.deckOutputReferences, chapter.duel.rentalDeck);
       }
+      if (unlockSecretIds.length && unlockSecretIds.every((id) => targetNumber(id) !== undefined)) sourceChapter.unlock_secret = (unlockSecretIds as number[]).join(' ');
       if (chapter.unlock?.chapterRefs.length) {
         sourceChapter.unlock = chapter.unlock.chapterRefs.map((reference) => ({
           type: chapter.unlock?.mode === 'and' ? 4 : 2,
@@ -1552,9 +1609,11 @@ export const compileGateContent = (
       parent_id: parentId,
       view_gate: viewId,
       priority: gate.priority,
-      // The additive source adapter interprets a numeric clear_chapter as a
+      // The Data materializer interprets a numeric clear_chapter as a
       // gate-local chapter number; the direct IR above remains composite.
       clear_chapter: goalId ? goalId % 10000 : 0,
+      category: SOLO_STORIES_CATEGORY,
+      open_date: SOLO_OPEN_DATE_EPOCH,
       name: gateText.value,
       description: gateDescription.value,
       chapters: sourceChapters,

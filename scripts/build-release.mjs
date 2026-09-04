@@ -4,7 +4,7 @@ import * as fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  TARGET_CONTRACT_VERSION, copyCliRuntimeDependencies, createReleaseArchive,
+  TARGET_CONTRACT_VERSION, copyCliBuildOutput, copyCliRuntimeDependencies, createReleaseArchive,
   discoverCliRuntimeDependencies, findPackagedApp, makeLogDirectory, npmCommand,
   preflightRelease, publishRelease, readReusableBuildState, runLoggedSafe,
   runReleaseStages, timed, validateBuiltCliContract, writeBuildState,
@@ -68,9 +68,7 @@ const buildCliAndPreflight = async () => {
 };
 
 const assemble = async () => {
-  await fs.mkdir(path.join(candidateRoot, 'cli'), { recursive: true });
-  await fs.cp(path.join(editorRoot, 'dist-cli', 'cli', 'index.js'), path.join(candidateRoot, 'cli', 'index.js'));
-  await fs.cp(path.join(editorRoot, 'dist-cli', 'core'), path.join(candidateRoot, 'core'), { recursive: true });
+  await copyCliBuildOutput({ distCliRoot: path.join(editorRoot, 'dist-cli'), stagingRoot: candidateRoot });
   await copyCliRuntimeDependencies({ editorRoot, stagingRoot: candidateRoot, dependencies: summary.dependencies });
   await fs.cp(appRoot, path.join(candidateRoot, 'app'), { recursive: true });
   await fs.writeFile(path.join(candidateRoot, 'manifest.json'), `${JSON.stringify({

@@ -8,7 +8,7 @@ export type TargetCapability =
   | 'structure'
   | 'clientData'
   | 'regulationRead'
-  | 'regulationOverlay'
+  | 'regulationTarget'
   | 'shop'
   | 'unlockSecret'
   | 'backgroundAsset';
@@ -25,9 +25,9 @@ export const TARGET_CAPABILITIES: Readonly<Record<TargetCapability, TargetCapabi
   structure: { status: 'assumed', blockingCode: 'STRUCTURE_TARGET_UNVERIFIED', evidence: 'compatibility-fixture' },
   clientData: { status: 'confirmed', evidence: 'upstream-docs' },
   regulationRead: { status: 'confirmed', evidence: 'upstream-docs' },
-  regulationOverlay: { status: 'unsupported', blockingCode: 'REGULATION_TARGET_UNSUPPORTED', evidence: 'undocumented' },
+  regulationTarget: { status: 'unsupported', blockingCode: 'REGULATION_TARGET_UNSUPPORTED', evidence: 'undocumented' },
   shop: { status: 'assumed', blockingCode: 'SHOP_TARGET_UNVERIFIED', evidence: 'official-example' },
-  unlockSecret: { status: 'unsupported', blockingCode: 'UNLOCK_SECRET_UNSUPPORTED', evidence: 'undocumented' },
+  unlockSecret: { status: 'assumed', blockingCode: 'UNLOCK_SECRET_UNVERIFIED', evidence: 'compatibility-fixture' },
   backgroundAsset: { status: 'confirmed', evidence: 'official-example' },
 });
 

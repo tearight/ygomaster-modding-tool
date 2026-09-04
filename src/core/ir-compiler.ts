@@ -2,7 +2,8 @@ import * as fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { publishAtomicDirectory } from './atomic-directory';
-import type { CardNameResolver } from './card-resolver';
+import { cardReferenceRequest } from './card-resolver';
+import type { CardNameResolver, CardReferenceInput } from './card-resolver';
 import { compileDecklist, type DeckIR, type DeckMetadata, type DeckResolutionOptions } from './deck-content';
 import { exists, pathInside, removeExact } from './fs';
 import { compileGateContent, parseGateContent, type GateCompileIR, type ParsedGateContent } from './gate-content';
@@ -11,6 +12,7 @@ import { planRegistry, type AllocationRequest, type IdRegistry } from './id-regi
 import { writeIrProjection, type IrProjectionFile, type IrStaleDisposition } from './ir-projection-writer';
 import { discoverContentSnapshot, type IrSnapshot } from './ir-snapshot';
 import { createIrGenerationMetadata, type IRGenerationMetadata } from './layers';
+import { validateReleaseProductGraph } from './release-product-content';
 import type { LocalizationCatalog } from './localization-content';
 import { compileShopContent, parseShopPackMetadata, type ShopContentSources, type ShopTargetProjection } from './shop-content';
 import { defaultManifest, manifestToJson } from './manifest';
@@ -29,6 +31,11 @@ import {
   type StructureRewardReference,
 } from './structure-content';
 import type { JsonObject, Problem } from './types';
+import {
+  parseDeckFolderCatalog,
+  validateDeckOrganization,
+  type DeckOrganizationDeck,
+} from './deck-organization';
 import { problem } from './types';
 import { validateCampaign } from './validate';
 
@@ -42,6 +49,7 @@ export const IR_COMPILER_CODES = Object.freeze({
   GATE_FAILED: 'IR_COMPILER_GATE_FAILED',
   STRUCTURE_FAILED: 'IR_COMPILER_STRUCTURE_FAILED',
   SHOP_FAILED: 'IR_COMPILER_SHOP_FAILED',
+  RELEASE_PRODUCT_FAILED: 'IR_COMPILER_RELEASE_PRODUCT_FAILED',
   CARD_REFERENCE_FAILED: 'IR_COMPILER_CARD_REFERENCE_FAILED',
   CAPABILITY_BLOCKED: 'IR_COMPILER_CAPABILITY_BLOCKED',
   STAGING_FAILED: 'IR_COMPILER_STAGING_FAILED',
@@ -50,10 +58,15 @@ export const IR_COMPILER_CODES = Object.freeze({
 } as const);
 
 export interface AuthoredDeckInput {
-  /** Legacy relative deck reference, for example `decks/cpu.json`. */
+  /** Generated legacy adapter path, for example `decks/cpu.json`. */
   key: string;
+  /** Authored symbolic identity, for example `deck:cpu`. */
+  reference?: string;
+  /** Accepted authored compatibility spellings, never additional outputs. */
+  aliases?: readonly string[];
   source: string;
   sourcePath: string;
+  sidecarPath?: string;
   metadata?: DeckMetadata;
   regulation?: string;
 }
@@ -69,9 +82,12 @@ export interface AuthoredRegulationInput extends RegulationContentSources {
 
 export interface CampaignIrBundle {
   decks: readonly AuthoredDeckInput[];
+  /** Authoring-only Deck folder catalog; consumed and validated, never projected. */
+  deckFolders?: AuthoredDocumentInput;
   gates: readonly AuthoredDocumentInput[];
   structures?: readonly AuthoredDocumentInput[];
   shops?: readonly ShopContentSources[];
+  releaseGraphs?: readonly AuthoredDocumentInput[];
   regulations?: readonly AuthoredRegulationInput[];
   localization?: LocalizationCatalog;
   language?: string;
@@ -79,10 +95,12 @@ export interface CampaignIrBundle {
   accessories?: StructureAccessoryCatalog;
   structureRewards?: readonly StructureRewardReference[];
   /** Symbolic Gate reward reference to exact reviewed English card name. */
-  cardReferences?: Record<string, string>;
+  cardReferences?: Record<string, CardReferenceInput>;
   /** Snapshot-bound authored PNGs mapped to symbolic Gate references. */
   gateBackgrounds?: readonly GateBackgroundAsset[];
-  overlay?: Record<string, IrProjectionFile>;
+  target?: Record<string, IrProjectionFile>;
+  /** Allowlisted runtime-baseline patches authored by the campaign. */
+  runtimePolicy?: Record<string, JsonObject>;
   /** Existing target capabilities already known to be blocking. */
   blockingCapabilities?: readonly Problem[];
   /** Non-family authored files consumed by localization/asset adapters. */
@@ -99,6 +117,8 @@ export interface CompileCampaignIrOptions {
   bundle: CampaignIrBundle;
   compilerVersion?: string;
   checkOnly?: boolean;
+  /** Commit guard for a UI-reviewed allocation plan; checked after staging validation and before publish. */
+  expectedOutputRegistryGeneration?: string;
   allowAssumedStructure?: boolean;
   /**
    * The project IR compiler uses the approved fixture adapter by default.
@@ -172,6 +192,7 @@ const trackedSourceProblems = (snapshot: IrSnapshot, bundle: CampaignIrBundle): 
   const tracked = new Set(snapshot.files.map((entry) => entry.path.replace(/\\/gu, '/')));
   const sources = [
     ...bundle.decks.map((entry) => entry.sourcePath),
+    ...(bundle.deckFolders ? [bundle.deckFolders.sourcePath] : []),
     ...bundle.gates.map((entry) => entry.sourcePath),
     ...(bundle.structures || []).map((entry) => entry.sourcePath),
     ...(bundle.shops || []).flatMap((entry) => [entry.metadataSourcePath, entry.packListSourcePath, entry.oddsSourcePath].filter((value): value is string => Boolean(value))),
@@ -188,6 +209,7 @@ const trackedSourceProblems = (snapshot: IrSnapshot, bundle: CampaignIrBundle): 
 const consumedSourceProblems = (snapshot: IrSnapshot, bundle: CampaignIrBundle): Problem[] => {
   const consumed = new Set([
     ...bundle.decks.map((entry) => entry.sourcePath),
+    ...(bundle.deckFolders ? [bundle.deckFolders.sourcePath] : []),
     ...bundle.gates.map((entry) => entry.sourcePath),
     ...(bundle.structures || []).map((entry) => entry.sourcePath),
     ...(bundle.shops || []).flatMap((entry) => [entry.metadataSourcePath, entry.packListSourcePath, entry.oddsSourcePath].filter((value): value is string => Boolean(value))),
@@ -203,12 +225,12 @@ const consumedSourceProblems = (snapshot: IrSnapshot, bundle: CampaignIrBundle):
 
 const automaticCapabilityProblems = (snapshot: IrSnapshot, bundle: CampaignIrBundle): Problem[] => {
   const problems: Problem[] = [];
-  for (const relative of Object.keys(bundle.overlay || {})) {
+  for (const relative of Object.keys(bundle.target || {})) {
     const basename = path.posix.basename(relative.replace(/\\/gu, '/')).toLowerCase();
     if (['shop.json', 'shoppackodds.json', 'shoppackoddsvisuals.json'].includes(basename)) {
-      problems.push(problem('SHOP_TARGET_UNSUPPORTED', `Shop overlay projection is unsupported: ${relative}`, relative));
+      problems.push(problem('SHOP_TARGET_UNSUPPORTED', `Direct Shop target projection is unsupported: ${relative}`, relative));
     }
-    if (basename === 'regulationmaster.json') problems.push(problem('REGULATION_TARGET_UNSUPPORTED', `Regulation overlay projection is unsupported: ${relative}`, relative));
+    if (basename === 'regulationmaster.json') problems.push(problem('REGULATION_TARGET_UNSUPPORTED', `Regulation target projection is unsupported: ${relative}`, relative));
   }
   return problems;
 };
@@ -230,7 +252,7 @@ const verifyBundleSources = async (contentRoot: string, bundle: CampaignIrBundle
   for (const entry of bundle.decks) {
     if (await readText(entry.sourcePath) !== entry.source) problems.push(problem(IR_COMPILER_CODES.SOURCE_UNTRACKED, `Deck bundle differs from authored source bytes: ${entry.sourcePath}`, entry.sourcePath));
   }
-  for (const entry of [...bundle.gates, ...(bundle.structures || [])]) {
+  for (const entry of [...(bundle.deckFolders ? [bundle.deckFolders] : []), ...bundle.gates, ...(bundle.structures || [])]) {
     try {
       const authored = JSON.parse((await readText(entry.sourcePath)).replace(/^\uFEFF/u, '')) as unknown;
       if (!jsonMatches(authored, entry.value)) problems.push(problem(IR_COMPILER_CODES.SOURCE_UNTRACKED, `Document bundle differs from authored source JSON: ${entry.sourcePath}`, entry.sourcePath));
@@ -285,12 +307,12 @@ const verifyBundleSources = async (contentRoot: string, bundle: CampaignIrBundle
 
 const cardReferenceIds = (
   resolver: CardNameResolver,
-  references: Record<string, string>,
+  references: Record<string, CardReferenceInput>,
 ): { ids: Record<string, number>; problems: Problem[] } => {
   const ids: Record<string, number> = {};
   const problems: Problem[] = [];
-  for (const [reference, sourceName] of Object.entries(references).sort(([left], [right]) => compareOrdinal(left, right))) {
-    const resolved = resolver.resolve({ sourceName, jsonPointer: `/cardReferences/${reference}` });
+  for (const [reference, input] of Object.entries(references).sort(([left], [right]) => compareOrdinal(left, right))) {
+    const resolved = resolver.resolve(cardReferenceRequest(input, { sourcePath: 'manifest.json', jsonPointer: `/cardReferences/${reference}` }));
     if (!resolved.ok || resolved.runtimeId === undefined) problems.push(...resolved.problems.map((entry) => ({ ...entry, code: IR_COMPILER_CODES.CARD_REFERENCE_FAILED })));
     else ids[reference] = resolved.runtimeId;
   }
@@ -370,27 +392,51 @@ export const compileCampaignIr = async (options: CompileCampaignIrOptions): Prom
   }
   if (regulations.size) warnings.push(problem(
     'REGULATION_TARGET_VALIDATION_ONLY',
-    'Regulation content is active for compile-time deck legality only; no target Regulation overlay will be published',
+    'Regulation content is active for compile-time deck legality only; no target Regulation Data will be published',
     undefined,
     'warning',
   ));
 
-  const deckInputs = new Map(options.bundle.decks.map((entry) => [entry.key, entry]));
-  if (deckInputs.size !== options.bundle.decks.length) {
-    problems.push(problem(IR_COMPILER_CODES.DECK_FAILED, 'Deck output keys must be unique'));
+  const deckInputs = new Map<string, AuthoredDeckInput>();
+  const deckOutputReferences: Record<string, string> = {};
+  const bindDeckReference = (reference: string, entry: AuthoredDeckInput): void => {
+    const existing = deckInputs.get(reference);
+    if (existing && existing !== entry) {
+      problems.push(problem(IR_COMPILER_CODES.DECK_FAILED, `Deck authored reference must resolve uniquely: ${reference}`, entry.sourcePath));
+      return;
+    }
+    deckInputs.set(reference, entry);
+    deckOutputReferences[reference] = entry.key;
+  };
+  const deckOutputKeys = new Set<string>();
+  for (const entry of options.bundle.decks) {
+    const portable = entry.key.replace(/\\/gu, '/').normalize('NFKC').toLocaleLowerCase('en-US');
+    if (deckOutputKeys.has(portable)) problems.push(problem(IR_COMPILER_CODES.DECK_FAILED, `Deck adapter output paths must be portable-unique: ${entry.key}`, entry.sourcePath));
+    deckOutputKeys.add(portable);
   }
   const deckProjections: Record<string, DeckIR> = {};
+  const deckLookupProjections: Record<string, DeckIR> = {};
+  const catalogDeckOptions: DeckResolutionOptions = options.deckOptions?.extraDeckCardIds !== undefined
+    || options.deckOptions?.isExtraDeckCard
+    ? { ...(options.deckOptions || {}) }
+    : { ...(options.deckOptions || {}), isExtraDeckCard: (runtimeId) => options.resolver.isExtraDeckCard(runtimeId) };
   for (const entry of [...options.bundle.decks].sort((left, right) => compareOrdinal(left.key, right.key))) {
     const regulation = entry.regulation ? regulations.get(normalizeRegulationKey(entry.regulation)) : undefined;
     if (entry.regulation && !regulation) problems.push(problem(IR_COMPILER_CODES.REGULATION_MISSING, `Deck ${entry.key} references missing regulation ${entry.regulation}`, entry.sourcePath));
     const compiled = compileDecklist(entry.source, options.resolver, {
-      ...(options.deckOptions || {}),
+      ...catalogDeckOptions,
       sourcePath: entry.sourcePath,
       metadata: entry.metadata,
       ...(regulation ? { regulationHook: createDeckRegulationHook(regulation) } : {}),
     });
     problems.push(...compiled.problems);
-    if (compiled.ir) deckProjections[entry.key] = compiled.ir;
+    if (compiled.ir) {
+      deckProjections[entry.key] = compiled.ir;
+      for (const reference of [entry.key, entry.reference, ...(entry.aliases || [])].filter((value): value is string => Boolean(value))) {
+        bindDeckReference(reference, entry);
+        if (deckInputs.get(reference) === entry) deckLookupProjections[reference] = compiled.ir;
+      }
+    }
   }
 
   const parsedGates: ParsedGateContent[] = [];
@@ -399,6 +445,36 @@ export const compileCampaignIr = async (options: CompileCampaignIrOptions): Prom
     problems.push(...parsed.problems);
     if (parsed.document) parsedGates.push(parsed.document);
   }
+  const deckFolderCatalog = options.bundle.deckFolders
+    ? parseDeckFolderCatalog(options.bundle.deckFolders.value, options.bundle.deckFolders.sourcePath)
+    : undefined;
+  if (deckFolderCatalog) problems.push(...deckFolderCatalog.problems);
+  const organizationDecks: DeckOrganizationDeck[] = options.bundle.decks.map((entry) => {
+    return {
+      key: entry.key,
+      reference: entry.reference as string,
+      aliases: entry.aliases,
+      sourcePath: entry.sourcePath,
+      adapterPath: entry.key,
+      ...(entry.sidecarPath ? { sidecarPath: entry.sidecarPath } : {}),
+      ...(entry.metadata ? { metadata: entry.metadata } : {}),
+    };
+  });
+  const organization = validateDeckOrganization(
+    deckFolderCatalog?.catalog,
+    organizationDecks,
+    parsedGates.map((gate) => ({
+      id: gate.gate.id,
+      sourcePath: gate.sourcePath,
+      deckFolder: gate.gate.deckFolder,
+      chapters: gate.gate.chapters.map((chapter) => ({
+        id: chapter.id,
+        cpuDeck: chapter.duel?.cpuDeck,
+        rentalDeck: chapter.duel?.rentalDeck,
+      })),
+    })),
+  );
+  problems.push(...organization.problems);
   for (const gate of parsedGates) {
     const regulation = gate.gate.regulation ? regulations.get(gate.gate.regulation) : undefined;
     if (gate.gate.regulation && !regulation) {
@@ -410,7 +486,7 @@ export const compileCampaignIr = async (options: CompileCampaignIrOptions): Prom
       const deck = deckInputs.get(reference);
       if (!deck) continue;
       const regulated = compileDecklist(deck.source, options.resolver, {
-        ...(options.deckOptions || {}),
+        ...catalogDeckOptions,
         sourcePath: deck.sourcePath,
         metadata: deck.metadata,
         regulationHook: createDeckRegulationHook(regulation),
@@ -434,8 +510,11 @@ export const compileCampaignIr = async (options: CompileCampaignIrOptions): Prom
     options.resolver,
     {
       registry: options.registry,
-      deckSources: Object.fromEntries(options.bundle.decks.map((entry) => [entry.key, entry.source])),
-      deckOptions: options.deckOptions,
+      deckSources: Object.fromEntries(options.bundle.decks.flatMap((entry) =>
+        [entry.key, entry.reference, ...(entry.aliases || [])]
+          .filter((value): value is string => Boolean(value))
+          .map((reference) => [reference, entry.source] as const))),
+      deckOptions: catalogDeckOptions,
       localization: options.bundle.localization,
       language: undefined,
       accessories: options.bundle.accessories,
@@ -444,7 +523,7 @@ export const compileCampaignIr = async (options: CompileCampaignIrOptions): Prom
       verifiedAdapter: approvedStructureAdapter,
     } as Parameters<typeof compileStructureCollection>[2],
   );
-  problems.push(...structureCollection.problems);
+  problems.push(...structureCollection.problems.filter((entry) => entry.severity !== 'warning'));
   warnings.push(...structureCollection.warnings);
   const registry = structureCollection.registry || options.registry;
   const structureIds: Record<string, number> = {};
@@ -455,7 +534,7 @@ export const compileCampaignIr = async (options: CompileCampaignIrOptions): Prom
     if (compiled.key && compiled.structureId !== undefined) structureIds[`structure:${compiled.key}`] = compiled.structureId;
     if (compiled.projection) {
       structureProjections.push(compiled.projection);
-      if (compiled.definition?.deck) structureDecks[compiled.projection.path] = compiled.definition.deck;
+      if (compiled.definition?.deck) structureDecks[compiled.projection.path] = deckOutputReferences[compiled.definition.deck] || compiled.definition.deck;
       if (compiled.localization) structureMetadata[compiled.projection.path] = {
         ...(compiled.localization.name ? { name: compiled.localization.name } : {}),
         ...(compiled.localization.description ? { description: compiled.localization.description } : {}),
@@ -492,13 +571,17 @@ export const compileCampaignIr = async (options: CompileCampaignIrOptions): Prom
     if (compiled.projection) shopProjections.push(compiled.projection);
   }
   const shopBySymbol = new Map(shopProjections.map((entry) => [entry.symbolicShopId, entry]));
+  const shopSourceBySymbol = new Map(shopInputs.flatMap((entry) => {
+    const parsed = parseShopPackMetadata(entry.metadata, entry.metadataSourcePath);
+    return parsed.document ? [[parsed.document.metadata.normalizedShopId, entry.metadataSourcePath || parsed.document.metadata.normalizedShopId] as const] : [];
+  }));
   const predecessorBySuccessor = new Map<string, string>();
   for (const projection of shopProjections) {
     if (!projection.predecessorRef) continue;
     predecessorBySuccessor.set(projection.symbolicShopId, projection.predecessorRef);
     const predecessor = shopBySymbol.get(projection.predecessorRef);
     if (!predecessor) {
-      problems.push(problem(IR_COMPILER_CODES.SHOP_FAILED, `Shop predecessor does not resolve: ${projection.predecessorRef}`, projection.symbolicShopId));
+      problems.push({ code: IR_COMPILER_CODES.SHOP_FAILED, message: `Shop predecessor does not resolve: ${projection.predecessorRef}`, severity: 'error', sourcePath: shopSourceBySymbol.get(projection.symbolicShopId) || projection.symbolicShopId, jsonPointer: '/payload/unlock' });
       continue;
     }
     const unlocks = predecessor.shopEntry.unlockSecrets as unknown as number[];
@@ -510,30 +593,56 @@ export const compileCampaignIr = async (options: CompileCampaignIrOptions): Prom
     let current: string | undefined = start;
     while (current && predecessorBySuccessor.has(current)) {
       if (seen.has(current)) {
-        problems.push(problem(IR_COMPILER_CODES.SHOP_FAILED, `Shop progression contains a cycle at ${current}`, current));
+        problems.push({ code: IR_COMPILER_CODES.SHOP_FAILED, message: `Shop progression contains a cycle at ${current}`, severity: 'error', sourcePath: shopSourceBySymbol.get(current) || current, jsonPointer: '/payload/unlock' });
         break;
       }
       seen.add(current);
       current = predecessorBySuccessor.get(current);
     }
   }
-  const shopOverlay: Record<string, IrProjectionFile> = shopProjections.length ? {
-    'Shop.json': {
+  const shopTarget: Record<string, IrProjectionFile> = {
+    'Data/Shop.json': {
       PackShop: Object.fromEntries(shopProjections
         .slice()
         .sort((left, right) => left.shopId - right.shopId)
         .map((entry) => [String(entry.shopId), entry.shopEntry])),
     },
-    'ShopPackOdds.json': {
+    'Data/ShopPackOdds.json': {
       entries: shopProjections
         .slice()
         .sort((left, right) => left.shopId - right.shopId)
         .map((entry) => entry.oddsEntry),
     },
-  } : {};
-  for (const managedPath of Object.keys(shopOverlay)) {
-    if (Object.keys(options.bundle.overlay || {}).some((entry) => entry.replace(/\\/gu, '/').replace(/^Data\//u, '').toLowerCase() === managedPath.toLowerCase())) {
-      problems.push(problem(IR_COMPILER_CODES.SHOP_FAILED, `Generated Shop projection collides with a supplied overlay: ${managedPath}`, managedPath));
+  };
+  const runtimePolicyTarget: Record<string, IrProjectionFile> = {};
+  const policyPaths: Record<string, string> = {
+    settings: 'Data/Settings.json',
+    shop: 'Data/Shop.policy.json',
+    client: 'Data/ClientData/ClientSettings.json',
+  };
+  for (const [family, payload] of Object.entries(options.bundle.runtimePolicy || {})) {
+    const targetPath = policyPaths[family];
+    if (!targetPath) {
+      problems.push(problem(IR_COMPILER_CODES.CAPABILITY_BLOCKED, `Unknown runtime policy family: ${family}`, `runtime-policy/${family}.json`));
+      continue;
+    }
+    runtimePolicyTarget[targetPath] = { patch: payload };
+  }
+  for (const managedPath of Object.keys(shopTarget)) {
+    if (Object.keys(options.bundle.target || {}).some((entry) => entry.replace(/\\/gu, '/').toLowerCase() === managedPath.toLowerCase())) {
+      problems.push(problem(IR_COMPILER_CODES.SHOP_FAILED, `Generated Shop projection collides with supplied target data: ${managedPath}`, managedPath));
+    }
+  }
+  const releaseGraphProjections: Record<string, JsonObject> = {};
+  for (const entry of options.bundle.releaseGraphs || []) {
+    const validated = validateReleaseProductGraph(entry.value, entry.sourcePath, {
+      knownShopRefs: shopProjections.map((projection) => projection.symbolicShopId),
+      knownStructureRefs: Object.keys(structureIds),
+      knownRewardRefs: [],
+    });
+    problems.push(...validated.problems);
+    if (validated.ok && validated.document) {
+      releaseGraphProjections[path.posix.basename(entry.sourcePath)] = validated.document as unknown as JsonObject;
     }
   }
   const cards = cardReferenceIds(options.resolver, options.bundle.cardReferences || {});
@@ -545,10 +654,12 @@ export const compileCampaignIr = async (options: CompileCampaignIrOptions): Prom
     localization: options.bundle.localization,
     language: options.bundle.language,
     fallbackLanguage: options.bundle.fallbackLanguage,
-    deckReferences: Object.keys(deckProjections),
-    deckProjections,
+    deckReferences: Object.keys(deckLookupProjections),
+    deckProjections: deckLookupProjections,
+    deckOutputReferences,
     cardIds: cards.ids,
     structureIds,
+    shopIds: Object.fromEntries(shopProjections.map((entry) => [entry.symbolicShopId, entry.shopId])),
   });
   problems.push(...gateCompiled.problems);
   warnings.push(...gateCompiled.warnings);
@@ -568,9 +679,9 @@ export const compileCampaignIr = async (options: CompileCampaignIrOptions): Prom
     finalRegistry,
   );
   problems.push(...backgrounds.problems);
-  for (const relative of Object.keys(backgrounds.overlay)) {
-    if (Object.keys(options.bundle.overlay || {}).some((entry) => entry.replace(/\\/gu, '/').replace(/^Data\//u, '').toLowerCase() === relative.toLowerCase())) {
-      problems.push(problem(GATE_BACKGROUND_CODES.DUPLICATE, `Generated Gate background collides with a supplied overlay: ${relative}`, relative));
+  for (const relative of Object.keys(backgrounds.target)) {
+    if (Object.keys(options.bundle.target || {}).some((entry) => entry.replace(/\\/gu, '/').toLowerCase() === relative.toLowerCase())) {
+      problems.push(problem(GATE_BACKGROUND_CODES.DUPLICATE, `Generated Gate background collides with supplied target data: ${relative}`, relative));
     }
   }
   if (problems.length) return failureResult(checkOnly, problems, {
@@ -604,9 +715,10 @@ export const compileCampaignIr = async (options: CompileCampaignIrOptions): Prom
       decks: deckProjections,
       gates: [gateCompiled.ir],
       structures: structureProjections,
+      graphs: releaseGraphProjections,
       structureDecks,
       structureMetadata,
-      overlay: { ...(options.bundle.overlay || {}), ...shopOverlay, ...backgrounds.overlay },
+      target: { ...(options.bundle.target || {}), ...shopTarget, ...runtimePolicyTarget, ...backgrounds.target },
       generation,
       provenance,
       ...(await exists(options.irRoot) ? { preservedSourceRoot: options.irRoot } : {}),
@@ -623,6 +735,9 @@ export const compileCampaignIr = async (options: CompileCampaignIrOptions): Prom
       snapshot, generation, provenance, registry: finalRegistry, warnings: sortedProblems(warnings), deckProjections,
       gateProjection: gateCompiled.ir, structureProjections, shopProjections, diff, staleDisposition: written.staleDisposition,
     };
+    if (!checkOnly && options.expectedOutputRegistryGeneration && finalRegistry.generation !== options.expectedOutputRegistryGeneration) {
+      return failureResult(false, [problem('ID_REGISTRY_STALE_PLAN', `Reviewed registry plan ${options.expectedOutputRegistryGeneration} changed to ${finalRegistry.generation}`, options.irRoot)], resultBase);
+    }
     if (checkOnly || zeroDiff) {
       await removeExact(stagingRoot);
       return { ok: true, checkOnly, published: false, zeroDiff, problems: [], ...resultBase };

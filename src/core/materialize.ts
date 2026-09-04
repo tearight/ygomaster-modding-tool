@@ -10,10 +10,12 @@ import {
   listFiles,
   pathInside,
   readJsonFile,
+  removeExact,
   resolveInside,
 } from './fs';
 import { cloneJson, serializePayload, unwrapPayload } from './json';
 import { getWorkspacePaths, loadManifest } from './manifest';
+import { validateRuntimePolicyPatch, type RuntimePolicyFamily } from './runtime-policy';
 import { CoreLogger, JsonObject, Problem, SourceManifest, problem } from './types';
 
 type LooseObject = Record<string, unknown>;
@@ -25,19 +27,13 @@ const string = (value: unknown, fallback = '') => (typeof value === 'string' ? v
 const array = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
 const numericKeys = (value: LooseObject) => Object.keys(value).map(Number).filter(Number.isInteger);
 const INT32_MAX = 2147483647;
-const GATE_MIN = 90000;
-const GATE_MAX = 90999;
+const GATE_MIN = 100;
+const GATE_MAX = 2101;
 const STRUCTURE_MIN = 1129000;
 const STRUCTURE_MAX = 1129999;
 const SHOP_MIN = 1130000;
 const SHOP_MAX = 1130999;
 const LOCAL_CHAPTER_MAX = 9999;
-const nextId = (value: LooseObject, label: string) => {
-  let candidate = Math.max(0, ...numericKeys(value)) + 1;
-  while (Object.prototype.hasOwnProperty.call(value, String(candidate))) candidate += 1;
-  if (!Number.isInteger(candidate) || candidate > INT32_MAX) throw new Error(`${label} allocator exceeded Int32`);
-  return candidate;
-};
 const compositeChapterId = (gateId: number, localId: number) => {
   const result = gateId * 10000 + localId;
   if (!Number.isInteger(result) || result > INT32_MAX) throw new Error(`Composite chapter id exceeds Int32: ${result}`);
@@ -91,12 +87,12 @@ const appendText = async (filePath: string, value: string): Promise<void> => {
   await atomicWriteText(filePath, `${original}${separator}${value}${value.endsWith('\n') ? '' : '\n'}`);
 };
 
-export const isForbiddenOverlay = (relative: string): boolean => {
+export const isUnsupportedTargetFile = (relative: string): boolean => {
   const lower = relative.toLowerCase().replaceAll('\\', '/');
   const parts = lower.split('/');
   const basename = parts.at(-1) || lower;
   const category = parts[0] || '';
-  if (['shop.json', 'shoppackodds.json'].includes(lower)) return false;
+  if (['shop.json', 'shoppackodds.json', 'data/settings.json', 'data/shop.policy.json', 'data/clientdata/clientsettings.json'].includes(lower)) return false;
   return category === 'shop'
     || category === 'settings'
     || category === 'regulation'
@@ -104,6 +100,45 @@ export const isForbiddenOverlay = (relative: string): boolean => {
     || basename.startsWith('shoppackodds')
     || basename === 'settings.json'
     || basename.startsWith('regulation');
+};
+
+/** Patch only declared, documented campaign-policy keys into the fresh runtime baseline. */
+const materializeRuntimePolicy = async (targetRoot: string, runtimeRoot: string, changedFiles: string[]): Promise<Set<string>> => {
+  const consumed = new Set<string>();
+  const policies = [
+    { family: 'settings', targetRelative: 'Data/Settings.json', sourceRelative: 'Data/Settings.json' },
+    { family: 'shop', targetRelative: 'Data/Shop.json', sourceRelative: 'Data/Shop.policy.json' },
+    { family: 'client', targetRelative: 'Data/ClientData/ClientSettings.json', sourceRelative: 'Data/ClientData/ClientSettings.json' },
+  ] as const;
+  for (const policy of policies) {
+    const sourcePath = path.join(targetRoot, ...policy.sourceRelative.split('/'));
+    if (!(await exists(sourcePath))) continue;
+    consumed.add(policy.sourceRelative.toLowerCase());
+    const managed = object(await readJsonFile(sourcePath));
+    const patch = object(managed.patch);
+    if (Object.keys(managed).some((key) => key !== 'patch')) throw new Error(`Managed runtime policy must contain only patch: ${policy.sourceRelative}`);
+    const validation = validateRuntimePolicyPatch(policy.family as RuntimePolicyFamily, patch, policy.sourceRelative);
+    const errors = validation.filter((entry) => entry.severity !== 'warning');
+    if (errors.length) throw new Error(errors.map((entry) => entry.message).join('; '));
+    const runtimePath = path.join(runtimeRoot, ...policy.targetRelative.split('/'));
+    await assertRealPathInside(runtimeRoot, runtimePath);
+    if (!(await exists(runtimePath))) throw new Error(`Runtime ${policy.targetRelative} is missing`);
+    const document = await readJsonFile<JsonObject>(runtimePath);
+    // Settings and ClientSettings are normally raw key-value files.  Some
+    // runtime snapshots wrap them, so patch the named envelope only when it
+    // exists; otherwise patch the root without inventing an envelope.
+    const payloadKey = policy.family === 'settings' ? 'Settings' : policy.family === 'client' ? 'ClientSettings' : 'Shop';
+    let generated: JsonObject;
+    try {
+      const source = unwrapPayload<JsonObject>(document, payloadKey);
+      generated = replaceObjectPayload(source, { ...object(source.payload), ...cloneJson(patch) } as JsonObject);
+    } catch {
+      generated = { ...object(document), ...cloneJson(patch) } as JsonObject;
+    }
+    await atomicWriteJson(runtimePath, generated);
+    changedFiles.push(policy.targetRelative);
+  }
+  return consumed;
 };
 
 const findNamedArray = (value: unknown, key: string): unknown[] | undefined => {
@@ -135,76 +170,87 @@ const replaceNamedArray = (value: unknown, key: string, replacement: unknown[]):
   return Object.values(record).some((child) => replaceNamedArray(child, key, replacement));
 };
 
-const applyManagedShopOverlay = async (
-  overlayRoot: string,
+/** Replace one owned object exactly while preserving its raw/wrapped envelope. */
+const replaceObjectPayload = (source: ReturnType<typeof unwrapPayload>, replacement: JsonObject): JsonObject => {
+  if (source.shape === 'wrapped') return serializePayload({ [source.payloadKey]: replacement } as JsonObject, source);
+  const document = cloneJson(source.document);
+  document[source.payloadKey] = cloneJson(replacement);
+  return document;
+};
+
+const materializeShopData = async (
+  targetRoot: string,
   runtimeRoot: string,
   changedFiles: string[],
 ): Promise<Set<string>> => {
   const consumed = new Set<string>();
-  const shopOverlayPath = path.join(overlayRoot, 'Shop.json');
-  if (await exists(shopOverlayPath)) {
-    consumed.add('shop.json');
-    const managed = object(await readJsonFile(shopOverlayPath));
-    const additions = object(managed.PackShop);
-    if (!Object.keys(additions).length || Object.keys(managed).some((key) => key !== 'PackShop')) {
-      throw new Error('Managed Shop overlay must contain only a non-empty PackShop object');
+  const shopTargetPath = path.join(targetRoot, 'Data', 'Shop.json');
+  if (await exists(shopTargetPath)) {
+    consumed.add('data/shop.json');
+    const managed = object(await readJsonFile(shopTargetPath));
+    const replacement = object(managed.PackShop);
+    if (!managed.PackShop || Object.keys(managed).some((key) => key !== 'PackShop')) {
+      throw new Error('Managed Shop target must contain only a PackShop object');
     }
     const runtimePath = path.join(runtimeRoot, 'Data', 'Shop.json');
     await assertRealPathInside(runtimeRoot, runtimePath);
     if (!(await exists(runtimePath))) throw new Error('Runtime Data/Shop.json is missing');
     const runtimeDocument = await readJsonFile<JsonObject>(runtimePath);
     const source = unwrapPayload<JsonObject>(runtimeDocument, 'PackShop');
-    const merged = { ...source.payload };
-    for (const [id, entry] of Object.entries(additions).sort(([left], [right]) => left.localeCompare(right, 'en'))) {
-      if (Object.prototype.hasOwnProperty.call(merged, id)) throw new Error(`Runtime Shop PackShop id already exists: ${id}`);
+    const generatedPacks: JsonObject = {};
+    for (const [id, entry] of Object.entries(replacement).sort(([left], [right]) => left.localeCompare(right, 'en'))) {
       const pack = object(entry);
       if (number(pack.packId, NaN) !== Number(id)) throw new Error(`Managed Shop packId does not match key: ${id}`);
-      if (Number(id) < SHOP_MIN || Number(id) > SHOP_MAX) throw new Error(`Managed Shop packId is outside the additive range: ${id}`);
-      merged[id] = cloneJson(pack) as never;
+      if (Number(id) < SHOP_MIN || Number(id) > SHOP_MAX) throw new Error(`Managed Shop packId is outside the campaign range: ${id}`);
+      generatedPacks[id] = cloneJson(pack) as never;
     }
-    await atomicWriteJson(runtimePath, serializePayload({ PackShop: merged } as JsonObject, source));
+    const withPacks = replaceObjectPayload(source, generatedPacks);
+    const structureSource = unwrapPayload<JsonObject>(withPacks, 'StructureShop');
+    await atomicWriteJson(runtimePath, replaceObjectPayload(structureSource, {}));
     changedFiles.push('Data/Shop.json');
   }
 
-  const oddsOverlayPath = path.join(overlayRoot, 'ShopPackOdds.json');
-  if (await exists(oddsOverlayPath)) {
-    consumed.add('shoppackodds.json');
-    const managed = object(await readJsonFile(oddsOverlayPath));
-    const additions = array(managed.entries);
-    if (!additions.length || Object.keys(managed).some((key) => key !== 'entries')) {
-      throw new Error('Managed ShopPackOdds overlay must contain only a non-empty entries array');
+  const oddsTargetPath = path.join(targetRoot, 'Data', 'ShopPackOdds.json');
+  if (await exists(oddsTargetPath)) {
+    consumed.add('data/shoppackodds.json');
+    const managed = object(await readJsonFile(oddsTargetPath));
+    const replacements = array(managed.entries);
+    if (!Array.isArray(managed.entries) || Object.keys(managed).some((key) => key !== 'entries')) {
+      throw new Error('Managed ShopPackOdds target must contain only an entries array');
     }
     const runtimePath = path.join(runtimeRoot, 'Data', 'ShopPackOdds.json');
     await assertRealPathInside(runtimeRoot, runtimePath);
     const runtimeDocument: unknown = await exists(runtimePath) ? await readJsonFile(runtimePath) : [];
     const existing = Array.isArray(runtimeDocument) ? runtimeDocument : findNamedArray(runtimeDocument, 'ShopPackOdds');
     if (!existing) throw new Error('Runtime ShopPackOdds must be a raw array or contain a ShopPackOdds array');
-    const names = new Set(existing.map((entry) => string(object(entry).name)).filter(Boolean));
-    const ids = new Set(existing.flatMap((entry) => array(object(entry).packShopIds).filter((id): id is number => Number.isInteger(id))));
-    for (const entry of additions) {
+    const names = new Set<string>();
+    const ids = new Set<number>();
+    for (const entry of replacements) {
       const odds = object(entry);
       const name = string(odds.name);
       const packIds = array(odds.packShopIds).filter((id): id is number => Number.isInteger(id));
       if (!name || !packIds.length || !Array.isArray(odds.cardRateList)) throw new Error('Managed Shop odds entry requires name, packShopIds, and cardRateList');
-      if (names.has(name)) throw new Error(`Runtime Shop odds name already exists: ${name}`);
-      if (packIds.some((id) => ids.has(id))) throw new Error(`Runtime Shop odds packShopId already exists: ${packIds.find((id) => ids.has(id))}`);
+      if (names.has(name)) throw new Error(`Managed Shop odds name is duplicated: ${name}`);
+      if (packIds.some((id) => ids.has(id))) throw new Error(`Managed Shop odds packShopId is duplicated: ${packIds.find((id) => ids.has(id))}`);
       names.add(name);
       packIds.forEach((id) => ids.add(id));
     }
-    const merged = [...existing, ...additions.map((entry) => cloneJson(entry))];
-    let generated: unknown = merged;
+    const generatedEntries = replacements.map((entry) => cloneJson(entry));
+    let generated: unknown = generatedEntries;
     if (!Array.isArray(runtimeDocument)) {
       generated = cloneJson(runtimeDocument);
-      if (!replaceNamedArray(generated, 'ShopPackOdds', merged)) throw new Error('Could not preserve ShopPackOdds wrapper shape');
+      if (!replaceNamedArray(generated, 'ShopPackOdds', generatedEntries)) throw new Error('Could not preserve ShopPackOdds wrapper shape');
     }
     await atomicWriteJson(runtimePath, generated);
     changedFiles.push('Data/ShopPackOdds.json');
+  }
+  if (!consumed.has('data/shop.json') || !consumed.has('data/shoppackodds.json')) {
+    throw new Error('Campaign target must provide Shop.json and ShopPackOdds.json');
   }
   return consumed;
 };
 
 export const unsupportedChapterPackFields = [
-  'unlock_secret',
   'unlock_pack',
   'secretType',
   'unlockSecrets',
@@ -262,29 +308,45 @@ const addChapterUnlock = (unlockMap: LooseObject, unlockItemMap: LooseObject, un
   for (const entry of unlocks) {
     const value = object(entry);
     const type = number(value.type, 3);
+    if (type === 2 || type === 4) {
+      const chapterId = number(value.chapterId, NaN);
+      const gateId = number(value.gateId, NaN);
+      if (!Number.isInteger(chapterId)) continue;
+      const targetChapterId = chapterId >= 10000
+        ? chapterId
+        : Number.isInteger(gateId)
+          ? safeComposite(chapterId, gateId, 1)
+          : NaN;
+      if (!Number.isInteger(targetChapterId)) continue;
+      unlock[String(type)] = [...array(unlock[String(type)]), targetChapterId];
+      continue;
+    }
+    if (type !== 3) continue;
+    const items = itemMap([entry]);
+    if (!Object.keys(items).length) continue;
     const itemId = nextUnlockItem.value++;
     unlock[String(type)] = [...array(unlock[String(type)]), itemId];
-    unlockItemMap[String(itemId)] = itemMap([entry]);
+    unlockItemMap[String(itemId)] = items;
   }
   if (Object.keys(unlock).length) unlockMap[String(unlockId)] = unlock;
   return Object.keys(unlock).length ? unlockId : 0;
 };
 
-export interface OverlayApplyResult {
+export interface DataMaterializationResult {
   warnings: Problem[];
   changedFiles: string[];
 }
 
-export const applyCampaignOverlay = async (
+export const materializeCampaignData = async (
   sourceRoot: string,
   runtimeRoot: string,
   options: { projectRoot?: string; logger?: CoreLogger } = {},
-): Promise<OverlayApplyResult> => {
+): Promise<DataMaterializationResult> => {
   const warnings: Problem[] = [];
   const changedFiles: string[] = [];
   const manifest: SourceManifest = await loadManifest(sourceRoot);
   const paths = getWorkspacePaths(options.projectRoot || path.dirname(sourceRoot), sourceRoot, manifest);
-  await Promise.all([paths.gateRoot, paths.deckRoot, paths.structureRoot, paths.overlayRoot].map((root) => assertRealPathInside(sourceRoot, root)));
+  await Promise.all([paths.gateRoot, paths.deckRoot, paths.structureRoot, paths.targetRoot].map((root) => assertRealPathInside(sourceRoot, root)));
   const dataRoot = path.resolve(runtimeRoot, 'Data');
   const soloPath = path.join(dataRoot, 'Solo.json');
   await assertRealPathInside(runtimeRoot, soloPath);
@@ -292,22 +354,25 @@ export const applyCampaignOverlay = async (
   const soloDocument = await readJsonFile<JsonObject>(soloPath);
   const soloSource = unwrapPayload<{ Master?: JsonObject }>(soloDocument, 'Master');
   const master = object(soloSource.payload);
-  const solo = object(master.Solo);
-  if (!Object.keys(solo).length) throw new Error('Runtime Solo.json does not contain Master.Solo');
-  const gates = object(solo.gate);
-  const chapters = object(solo.chapter);
-  const unlocks = object(solo.unlock);
-  const unlockItems = object(solo.unlock_item);
-  const rewards = object(solo.reward);
+  const runtimeSolo = object(master.Solo);
+  if (!Object.keys(runtimeSolo).length) throw new Error('Runtime Solo.json does not contain Master.Solo');
+  const gates: LooseObject = {};
+  const chapters: LooseObject = {};
+  const unlocks: LooseObject = {};
+  const unlockItems: LooseObject = {};
+  const rewards: LooseObject = {};
+  const solo: LooseObject = { ...runtimeSolo, gate: gates, chapter: chapters, unlock: unlocks, unlock_item: unlockItems, reward: rewards };
   solo.gate = gates;
   solo.chapter = chapters;
   solo.unlock = unlocks;
   solo.unlock_item = unlockItems;
   solo.reward = rewards;
-  let unlockId = nextId(unlocks, 'unlock');
-  let unlockItemId = nextId(unlockItems, 'unlock item');
-  let rewardId = nextId(rewards, 'reward');
+  let unlockId = 1;
+  let unlockItemId = 1;
+  let rewardId = 1;
   const duelOutputs: Array<{ chapterId: number; document: JsonObject }> = [];
+  const gateCardLines: string[] = [];
+  const soloIdSections: string[] = [];
 
   const gateFiles = await listFiles(paths.gateRoot, '.json');
   for (const gateFile of gateFiles) {
@@ -315,10 +380,15 @@ export const applyCampaignOverlay = async (
     const sourceGate = object(await readJsonFile(gateFile));
     const gateId = number(sourceGate.id, NaN);
     if (!Number.isInteger(gateId)) throw new Error(`Gate id is invalid: ${relative}`);
-    if (gateId < GATE_MIN || gateId > GATE_MAX) throw new Error(`Gate id is outside the additive range: ${gateId}`);
-    if (gates[String(gateId)]) throw new Error(`Runtime gate id already exists: ${gateId}`);
+    if (gateId < GATE_MIN || gateId > GATE_MAX) throw new Error(`Gate id is outside the campaign range: ${gateId}`);
+    if (gates[String(gateId)]) throw new Error(`Campaign gate id is duplicated: ${gateId}`);
     const gateRecord: LooseObject = { ...sourceGate };
     delete gateRecord.id;
+    // `parent_id` belongs to the generated source format. The runtime
+    // contract uses `parent_gate`; retaining both fields leaks a legacy
+    // linkage key into Solo.json and can make the client resolve a custom
+    // gate against the wrong list entry.
+    delete gateRecord.parent_id;
     delete gateRecord.name;
     delete gateRecord.description;
     delete gateRecord.illust_id;
@@ -352,7 +422,7 @@ export const applyCampaignOverlay = async (
       const sourceChapter = object(sourceChapterValue);
       const localId = localChapterId(gateId, number(sourceChapter.id, 1));
       const chapterId = compositeChapterId(gateId, localId);
-      if (object(chapters[String(gateId)])[String(chapterId)]) throw new Error(`Runtime chapter id already exists: ${chapterId}`);
+      if (chapterMap[String(chapterId)]) throw new Error(`Campaign chapter id is duplicated: ${chapterId}`);
       const chapterRecord: LooseObject = { ...sourceChapter };
       delete chapterRecord.id;
       delete chapterRecord.parent_id;
@@ -362,12 +432,18 @@ export const applyCampaignOverlay = async (
       delete chapterRecord.reward;
       delete chapterRecord.mydeck_reward;
       delete chapterRecord.rental_reward;
+      // Deck references belong to the generated Modding Tool IR. Runtime
+      // Solo.json chapters point at the materialized SoloDuels payload via
+      // their chapter id; the private TCG/LE comparators do not carry these
+      // source paths in Master.Solo.chapter.
+      delete chapterRecord.cpu_deck;
+      delete chapterRecord.rental_deck;
       for (const field of unsupportedChapterPackFields) {
         if (sourceChapter[field] === undefined) continue;
         delete chapterRecord[field];
         warnings.push(problem(
-          field === 'unlock_secret' ? 'UNLOCK_SECRET_UNSUPPORTED' : 'UNSUPPORTED_PACK_FIELD',
-          `${field} is not generated by the public additive core`,
+          'UNSUPPORTED_PACK_FIELD',
+          `${field} is not generated by the campaign Data materializer`,
           `${relative}:chapters.${localId}`,
           'warning',
         ));
@@ -376,7 +452,7 @@ export const applyCampaignOverlay = async (
       chapterRecord.mydeck_set_id = 0;
       chapterRecord.set_id = 0;
       chapterRecord.unlock_id = 0;
-      // The additive source format carries chapter descriptions for IDS,
+      // The generated source format carries chapter descriptions for IDS,
       // while `begin_sn` is reserved for Scenario scripts.  The current
       // compiler has no Scenario kind; never let stale/generated/handwritten
       // source data reclassify a chapter as Scenario at the runtime boundary.
@@ -385,10 +461,13 @@ export const applyCampaignOverlay = async (
       chapterRecord.npc_id = duel ? 1 : 0;
       if (sourceChapter.difficulty !== undefined) chapterRecord.difficulty = number(sourceChapter.difficulty);
       if (array(sourceChapter.unlock).length) {
-        chapterRecord.unlock_id = unlockId;
-        addChapterUnlock(unlocks, unlockItems, unlockId, array(sourceChapter.unlock), { value: unlockItemId });
-        unlockItemId += array(sourceChapter.unlock).length;
-        unlockId += 1;
+        const nextUnlockItem = { value: unlockItemId };
+        const addedUnlockId = addChapterUnlock(unlocks, unlockItems, unlockId, array(sourceChapter.unlock), nextUnlockItem);
+        unlockItemId = nextUnlockItem.value;
+        if (addedUnlockId) {
+          chapterRecord.unlock_id = addedUnlockId;
+          unlockId += 1;
+        }
         if (unlockItemId > INT32_MAX || unlockId > INT32_MAX) throw new Error('unlock allocator exceeded Int32');
       }
       const rewardItems = array(sourceChapter.reward);
@@ -402,46 +481,46 @@ export const applyCampaignOverlay = async (
       if (duel) duelOutputs.push({ chapterId, document: await buildDuel(sourceChapter, chapterId, paths.deckRoot) });
     }
     if (sourceChapters.length) chapters[String(gateId)] = chapterMap;
-    const gateCardLine = `${gateId},${number(sourceGate.illust_id, 4027)},${number(sourceGate.illust_x)},${number(sourceGate.illust_y)}`;
-    const gateCardsPath = path.join(dataRoot, 'ClientData', 'SoloGateCards.txt');
-    await assertRealPathInside(runtimeRoot, gateCardsPath);
-    await ensureDirectory(path.dirname(gateCardsPath));
-    await appendText(gateCardsPath, gateCardLine);
-    changedFiles.push('Data/ClientData/SoloGateCards.txt');
+    gateCardLines.push(`${gateId},${number(sourceGate.illust_id, 4027)},${number(sourceGate.illust_x)},${number(sourceGate.illust_y)}`);
     let ids = `[IDS_SOLO.GATE${String(gateId).padStart(3, '0')}]\n${string(sourceGate.name)}\n[IDS_SOLO.GATE${String(gateId).padStart(3, '0')}_EXPLANATION]\n${string(sourceGate.description)}\n`;
     for (const sourceChapterValue of sourceChapters) {
       const sourceChapter = object(sourceChapterValue);
       const chapterId = compositeChapterId(gateId, localChapterId(gateId, number(sourceChapter.id, 1)));
       ids += `[IDS_SOLO.CHAPTER${chapterId}_EXPLANATION]\n${string(sourceChapter.description)}\n`;
     }
-    const soloIdsPath = path.join(dataRoot, 'ClientData', 'IDS', 'IDS_SOLO.txt');
-    await assertRealPathInside(runtimeRoot, soloIdsPath);
-    await ensureDirectory(path.dirname(soloIdsPath));
-    await appendText(soloIdsPath, ids);
-    changedFiles.push('Data/ClientData/IDS/IDS_SOLO.txt');
+    soloIdSections.push(ids.trimEnd());
   }
 
+  const gateCardsPath = path.join(dataRoot, 'ClientData', 'SoloGateCards.txt');
+  const soloIdsPath = path.join(dataRoot, 'ClientData', 'IDS', 'IDS_SOLO.txt');
+  await Promise.all([assertRealPathInside(runtimeRoot, gateCardsPath), assertRealPathInside(runtimeRoot, soloIdsPath)]);
+  await atomicWriteText(gateCardsPath, `${gateCardLines.join('\n')}\n`);
+  await atomicWriteText(soloIdsPath, `${soloIdSections.join('\n')}\n`);
+  changedFiles.push('Data/ClientData/SoloGateCards.txt', 'Data/ClientData/IDS/IDS_SOLO.txt');
+
   const duelRoot = path.join(dataRoot, 'SoloDuels');
+  await assertRealPathInside(runtimeRoot, duelRoot);
+  await removeExact(duelRoot);
   await ensureDirectory(duelRoot);
   for (const duel of duelOutputs) {
     const target = path.join(duelRoot, `${duel.chapterId}.json`);
     await assertRealPathInside(runtimeRoot, target);
-    if (await exists(target)) throw new Error(`Runtime duel file already exists: ${duel.chapterId}.json`);
     await atomicWriteJson(target, duel.document);
     changedFiles.push(path.relative(runtimeRoot, target).split(path.sep).join('/'));
   }
 
   const structureRoot = path.join(dataRoot, 'StructureDecks');
+  await assertRealPathInside(runtimeRoot, structureRoot);
+  await removeExact(structureRoot);
   await ensureDirectory(structureRoot);
   const structureFiles = await listFiles(paths.structureRoot, '.json');
   for (const structureFile of structureFiles) {
     const source = object(await readJsonFile(structureFile));
     const id = number(source.id, NaN);
     if (!Number.isInteger(id)) throw new Error(`Structure id is invalid: ${path.basename(structureFile)}`);
-    if (id < STRUCTURE_MIN || id > STRUCTURE_MAX) throw new Error(`Structure id is outside the additive range: ${id}`);
+    if (id < STRUCTURE_MIN || id > STRUCTURE_MAX) throw new Error(`Structure id is outside the campaign range: ${id}`);
     const target = path.join(structureRoot, `${id}.json`);
     await assertRealPathInside(runtimeRoot, target);
-    if (await exists(target)) throw new Error(`Runtime structure id already exists: ${id}`);
     const deck = await loadDeck(paths.deckRoot, string(source.deck));
     const main = deckPart(deck, 'm', 'Main');
     const extra = deckPart(deck, 'e', 'Extra');
@@ -462,41 +541,51 @@ export const applyCampaignOverlay = async (
     await appendText(itemDescPath, `[IDS_ITEMDESC.ID${id}]\n${string(source.description)}\n`);
   }
 
-  const generatedSolo = serializePayload({ Master: { ...master, Solo: solo } } as unknown as JsonObject, soloSource);
+  const generatedSolo = replaceObjectPayload(soloSource, { ...master, Solo: solo } as unknown as JsonObject);
   await atomicWriteJson(soloPath, generatedSolo);
   changedFiles.push('Data/Solo.json');
 
-  const managedShopOverlays = await applyManagedShopOverlay(paths.overlayRoot, runtimeRoot, changedFiles);
+  const managedTargetFiles = new Set([
+    ...(await materializeShopData(paths.targetRoot, runtimeRoot, changedFiles)),
+    ...(await materializeRuntimePolicy(paths.targetRoot, runtimeRoot, changedFiles)),
+  ]);
 
-  const overlayFiles = await listFiles(paths.overlayRoot);
-  for (const file of overlayFiles) {
-    const relative = path.relative(paths.overlayRoot, file).split(path.sep).join('/');
-    if (managedShopOverlays.has(relative.toLowerCase())) continue;
-    if (isForbiddenOverlay(relative)) {
-      warnings.push(problem('OVERLAY_SCOPE_UNSUPPORTED', `Skipped unsupported overlay ${relative}`, relative, 'warning'));
-      continue;
+  const targetFiles = await listFiles(paths.targetRoot);
+  const backgroundRoot = path.join(dataRoot, 'ClientData', 'SoloGateBackgrounds');
+  await assertRealPathInside(runtimeRoot, backgroundRoot);
+  await removeExact(backgroundRoot);
+  await ensureDirectory(backgroundRoot);
+  for (const file of targetFiles) {
+    const relative = path.relative(paths.targetRoot, file).split(path.sep).join('/');
+    if (managedTargetFiles.has(relative.toLowerCase())) continue;
+    if (isUnsupportedTargetFile(relative)) {
+      throw new Error(`Unsupported campaign target file: ${relative}`);
     }
-    if (!relative.toLowerCase().startsWith('clientdata/')) {
-      warnings.push(problem('OVERLAY_SCOPE_UNSUPPORTED', `Only additive ClientData overlays are supported: ${relative}`, relative, 'warning'));
-      continue;
+    if (!relative.toLowerCase().startsWith('data/clientdata/sologatebackgrounds/')) {
+      throw new Error(`Unsupported campaign target file: ${relative}`);
     }
-    const targetRelative = relative.startsWith('ClientData/') ? `Data/${relative}` : `Data/${relative}`;
+    if (!relative.toLowerCase().endsWith('.png')) {
+      throw new Error(`Campaign Gate background must be a PNG: ${relative}`);
+    }
+    const basename = path.basename(relative);
+    if (!/^\d+\.png$/u.test(basename)) {
+      throw new Error(`Campaign Gate background must use a numeric Gate id filename: ${relative}`);
+    }
+    const targetRelative = `Data/ClientData/SoloGateBackgrounds/${basename}`;
     const target = path.resolve(runtimeRoot, ...targetRelative.split('/'));
     await assertRealPathInside(runtimeRoot, target);
-    if (!pathInside(runtimeRoot, target)) throw new Error(`Overlay path escapes runtime: ${relative}`);
-    if (await exists(target)) {
-      if (relative.toLowerCase().endsWith('.txt')) {
-        await appendText(target, await fs.readFile(file, 'utf8'));
-        changedFiles.push(targetRelative);
-      } else {
-        warnings.push(problem('OVERLAY_EXISTING_SKIPPED', `Skipped existing runtime overlay ${relative}`, relative, 'warning'));
-      }
-    } else {
-      await ensureDirectory(path.dirname(target));
-      await fs.copyFile(file, target);
-      changedFiles.push(targetRelative);
-    }
+    if (!pathInside(runtimeRoot, target)) throw new Error(`Campaign target path escapes runtime: ${relative}`);
+    await fs.copyFile(file, target);
+    changedFiles.push(targetRelative);
   }
-  options.logger?.info?.('Applied additive campaign overlay', { changedFiles });
-  return { warnings, changedFiles };
+  const backgroundIds = new Set(targetFiles
+    .map((file) => path.relative(paths.targetRoot, file).split(path.sep).join('/'))
+    .filter((relative) => relative.toLowerCase().startsWith('data/clientdata/sologatebackgrounds/'))
+    .map((relative) => Number(path.basename(relative, '.png'))));
+  for (const gateId of numericKeys(gates)) {
+    if (!backgroundIds.has(gateId)) throw new Error(`Campaign Gate background is missing: ${gateId}.png`);
+  }
+  const uniqueChangedFiles = [...new Set(changedFiles)];
+  options.logger?.info?.('Materialized authoritative campaign Data', { changedFiles: uniqueChangedFiles });
+  return { warnings, changedFiles: uniqueChangedFiles };
 };

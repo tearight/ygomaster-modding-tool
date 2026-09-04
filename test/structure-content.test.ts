@@ -21,7 +21,7 @@ import {
   parseLocalizationText,
 } from '../src/core/localization-content';
 import { createEmptyRegistry } from '../src/core/id-registry';
-import { applyCampaignOverlay } from '../src/core/overlay';
+import { materializeCampaignData } from '../src/core/materialize';
 import type { DeckIR } from '../src/core/deck-content';
 
 const fixtureRoot = path.resolve(__dirname, '../../../campaign/fixtures/structure-content');
@@ -32,13 +32,13 @@ const readFixture = async (relativePath: string): Promise<string> =>
 const readJsonFixture = async (relativePath: string): Promise<Record<string, unknown>> =>
   JSON.parse(await readFixture(relativePath)) as Record<string, unknown>;
 
-const makeCard = (id: number, english: string): CatalogCard => ({
+const makeCard = (id: number, english: string, type?: number): CatalogCard => ({
   id,
   ydkId: id + 800000,
   names: { english, display: english },
   texts: {},
   original: {},
-  stats: {},
+  stats: { ...(type === undefined ? {} : { type }) },
   autoTags: [],
 });
 
@@ -49,7 +49,7 @@ const cards: CatalogCard[] = [
   makeCard(1004, 'Chronicle Dragon — Revised'),
   makeCard(1005, '1000-Eyes Restrict'),
   ...Array.from({ length: 9 }, (_, index) => makeCard(1007 + index, `Main Card ${String(index + 7).padStart(2, '0')}`)),
-  makeCard(1016, 'Extra Card Alpha'),
+  makeCard(1016, 'Extra Card Alpha', 0x41),
   makeCard(1017, 'Extra Card Beta'),
   makeCard(1018, 'Side Card'),
 ];
@@ -77,7 +77,7 @@ const baseOptions = async (overrides: Record<string, unknown> = {}) => ({
   deckSources: { 'deck.decklist': await readFixture('success/deck.decklist') },
   localization,
   accessories: { 'starter-accessory': { box: 0, sleeve: 0 } },
-  extraDeckCardIds: new Set([1016]),
+  isExtraDeckCard: (runtimeId: number) => resolver.isExtraDeckCard(runtimeId),
   allowAssumed: true,
   ...overrides,
 });
@@ -120,6 +120,25 @@ describe('STC-001 symbolic structure content', () => {
     assert.deepEqual(result.deckIr?.e, { ids: [1016], r: [1] });
     assert.deepEqual(result.deckIr?.s, { ids: [1018], r: [1] });
     assert.ok(result.warnings.some((entry) => entry.code === STRUCTURE_CODES.REWARD_ONE_COPY_ASSUMED));
+  });
+
+  it('uses the same reviewed selector for Structure focus and its referenced deck', async () => {
+    const selectedResolver = createCardResolver([...cards, makeCard(2001, 'Blue Eyes White Dragon')], {
+      aliases: [{ name: 'Chronicle Dragon', runtimeId: 1004, reviewed: true, source: 'fixture' }],
+    });
+    const document = await readJsonFixture('success/structure.json');
+    const payload = document.payload as Record<string, unknown>;
+    payload.focus = [{
+      name: 'Blue-Eyes White Dragon',
+      selector: { runtimeId: 1001, provenance: 'official-ocg-db:4007', variant: 'official-art' },
+    }, 'Chronicle Dragon', 'Number 39: Utopia'];
+    const deckSource = (await readFixture('success/deck.decklist'))
+      .replace(/Blue-Eyes White Dragon/gu, 'Blue-Eyes White Dragon @runtime=1001 @provenance=official-ocg-db:4007 @variant=official-art')
+      .replace(/BLUE—EYES WHITE DRAGON/gu, 'BLUE—EYES WHITE DRAGON @runtime=1001 @provenance=official-ocg-db:4007 @variant=official-art');
+    const result = await compileStructureContent(document, selectedResolver, await baseOptions({ deckSources: { 'deck.decklist': deckSource } }));
+    assert.equal(result.ok, true, JSON.stringify(result.problems));
+    assert.equal(result.focus?.[0]?.runtimeId, 1001);
+    assert.equal(result.focus?.[0]?.selector?.variant, 'official-art');
   });
 
   it('requires an explicit assumed/verified structure adapter and supports either opt-in', async () => {
@@ -236,7 +255,7 @@ describe('STC-001 symbolic structure content', () => {
     assert.equal(parsed.raw.fixture_wrapper && typeof parsed.raw.fixture_wrapper, 'object');
   });
 
-  it('projects a compiled structure through the additive overlay core and preserves deck IR semantics', async () => {
+  it('materializes a compiled structure and preserves deck IR semantics', async () => {
     const compiled = await compileStructureContent(
       await readJsonFixture('success/structure.json'),
       resolver,
@@ -253,15 +272,15 @@ describe('STC-001 symbolic structure content', () => {
         mkdir(path.join(sourceRoot, 'gate'), { recursive: true }),
         mkdir(path.join(sourceRoot, 'deck'), { recursive: true }),
         mkdir(path.join(sourceRoot, 'structure'), { recursive: true }),
-        mkdir(path.join(sourceRoot, 'overlay'), { recursive: true }),
+        mkdir(path.join(sourceRoot, 'target', 'ygomaster', 'Data'), { recursive: true }),
         mkdir(path.join(runtimeRoot, 'Data'), { recursive: true }),
       ]);
       await writeFile(path.join(sourceRoot, 'manifest.json'), JSON.stringify({
         formatVersion: 1,
         campaign: { name: 'STC fixture', slug: 'stc-fixture', version: 'test/1' },
-        directories: { gate: 'gate', deck: 'deck', structure: 'structure', overlay: 'overlay' },
+        directories: { gate: 'gate', deck: 'deck', structure: 'structure', target: 'target/ygomaster' },
         authoring: { language: 'English' },
-        idPolicy: { gatePrefix: 90000, structurePrefix: 1129000 },
+        idPolicy: { gatePrefix: 100, structurePrefix: 1129000 },
         runtime: { repository: 'pixeltris/YgoMaster', channel: 'latest', autoDownload: false },
       }), 'utf8');
       await writeFile(path.join(sourceRoot, 'deck', 'deck.json'), JSON.stringify(compiled.deckIr), 'utf8');
@@ -277,8 +296,12 @@ describe('STC-001 symbolic structure content', () => {
       await writeFile(path.join(runtimeRoot, 'Data', 'Solo.json'), JSON.stringify({
         Master: { Solo: { gate: {}, chapter: {}, unlock: {}, unlock_item: {}, reward: {} } },
       }), 'utf8');
+      await writeFile(path.join(sourceRoot, 'target', 'ygomaster', 'Data', 'Shop.json'), JSON.stringify({ PackShop: {} }), 'utf8');
+      await writeFile(path.join(sourceRoot, 'target', 'ygomaster', 'Data', 'ShopPackOdds.json'), JSON.stringify({ entries: [] }), 'utf8');
+      await writeFile(path.join(runtimeRoot, 'Data', 'Shop.json'), JSON.stringify({ PackShop: { '1': {} }, StructureShop: { '2': {} } }), 'utf8');
+      await writeFile(path.join(runtimeRoot, 'Data', 'ShopPackOdds.json'), JSON.stringify([{ name: 'baseline' }]), 'utf8');
 
-      const applied = await applyCampaignOverlay(sourceRoot, runtimeRoot, { projectRoot: root });
+      const applied = await materializeCampaignData(sourceRoot, runtimeRoot, { projectRoot: root });
       assert.ok(applied.changedFiles.includes('Data/StructureDecks/1129001.json'));
       const generated = JSON.parse(await readFile(path.join(runtimeRoot, 'Data', 'StructureDecks', '1129001.json'), 'utf8')) as Record<string, unknown>;
       assert.deepEqual(generated.structure_id, compiled.target?.structure_id);

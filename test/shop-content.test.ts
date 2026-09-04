@@ -51,7 +51,10 @@ const targetSources = async () => {
   const payload: Record<string, unknown> = { ...metadata.payload, availability: 'always', oddsName: 'chronicle-first', imageKey: 'set-chronicle-first', cover: 'Blue-Eyes White Dragon' };
   delete payload.unlock;
   delete payload.unlockRef;
-  return { ...sources, metadata: { ...metadata, payload } };
+  delete payload.fixtureUnknown;
+  const odds = { ...(sources.odds as { formatVersion: number; kind: string; payload: Record<string, unknown> }), payload: { ...((sources.odds as { payload: Record<string, unknown> }).payload) } };
+  delete odds.payload.fixtureUnknown;
+  return { ...sources, metadata: { ...metadata, payload }, odds };
 };
 
 const codes = (problems: readonly { code: string }[]): string[] => problems.map((entry) => entry.code);
@@ -90,11 +93,26 @@ describe('versioned Shop content source validation', () => {
     });
   });
 
+  it('keeps catalog-classified Fusion cards eligible for pack ownership', async () => {
+    const catalog = await readFixture<CatalogFixture>('catalog.json');
+    const fusionCatalog = catalog.cards.map((card, index) => index === 0
+      ? { ...card, stats: { ...card.stats, type: 0x41 }, autoTags: [...card.autoTags, 'type:fusion'] }
+      : card);
+    const resolver = createCardResolver(fusionCatalog);
+    const result = validateShopContent(await validSources(), {
+      resolver,
+      knownContentTargets: ['chapter:chronicle-opening'],
+    });
+    assert.equal(result.ok, true, JSON.stringify(result.problems));
+    assert.equal(resolver.isExtraDeckCard(1001), true);
+    assert.equal(result.packList?.entries.some((entry) => entry.runtimeId === 1001), true);
+  });
+
   it('keeps card resolver diagnostics tied to the packlist source span', async () => {
     const resolver = await fixtureResolver();
     const sources = await validSources();
     sources.packList = '[common]\nBlue-Eyes White Draggon\n';
-    const result = validateShopContent(sources, resolver);
+    const result = validateShopContent(sources, { resolver, knownContentTargets: ['chapter:chronicle-opening'] });
     const unresolved = result.problems.find((problem) => problem.code === 'CARD_NAME_UNRESOLVED');
 
     assert.equal(result.ok, false);
@@ -103,6 +121,24 @@ describe('versioned Shop content source validation', () => {
     assert.equal(unresolved?.column, 1);
     assert.equal(unresolved?.sourceSpan?.sourcePath, 'pools/chronicle-first.packlist');
     assert.equal(result.resolutionLock, undefined);
+  });
+
+  it('uses a reviewed selector for an ambiguous pack member and retains it in the lock', async () => {
+    const catalog = await readFixture<CatalogFixture>('catalog.json');
+    const resolver = createCardResolver([
+      ...catalog.cards,
+      { ...catalog.cards[0], id: 2001, ydkId: 20001 },
+    ]);
+    const sources = await validSources();
+    sources.packList = sources.packList.replace(
+      'Blue-Eyes White Dragon',
+      'Blue-Eyes White Dragon @runtime=1001 @provenance=official-ocg-db:4007 @variant=official-art',
+    );
+    const result = validateShopContent(sources, { resolver, knownContentTargets: ['chapter:chronicle-opening'] });
+    assert.equal(result.ok, true, JSON.stringify(result.problems));
+    assert.equal(result.packList?.entries[0]?.selector?.runtimeId, 1001);
+    assert.equal(result.resolutionLock?.entries[0]?.selector?.provenance, 'official-ocg-db:4007');
+    assert.equal(result.packList?.entries[0]?.runtimeId, 1001);
   });
 });
 
@@ -310,6 +346,21 @@ describe('Shop odds, unlock, and capability boundaries', () => {
     const unregistered = compileShopContent(sources, { resolver, registry: createEmptyRegistry() });
     assert.equal(unregistered.problems.some((problem) => problem.code === SHOP_CONTENT_CODES.SHOP_ID_UNREGISTERED), true);
     assert.equal(unregistered.projection, undefined);
+  });
+
+  it('preserves unknown source fields while blocking them from the target allowlist', async () => {
+    const resolver = await fixtureResolver();
+    const sources = await targetSources();
+    const metadata = sources.metadata as { formatVersion: number; kind: string; payload: Record<string, unknown> };
+    metadata.payload.cashProduct = { sku: 'unsupported' };
+    const registry = planRegistry(createEmptyRegistry(), [{ namespace: 'shop', key: 'chronicle-first-pack', pin: 1130001 }]).registry;
+    const compiled = compileShopContent(sources, { resolver, registry });
+    const unsupported = compiled.problems.find((entry) => entry.code === SHOP_CONTENT_CODES.FIELD_UNSUPPORTED);
+    assert.equal(compiled.ok, false);
+    assert.equal(compiled.projection, undefined);
+    assert.equal(unsupported?.sourcePath, 'metadata/chronicle-first.json');
+    assert.equal(unsupported?.jsonPointer, '/payload/cashProduct');
+    assert.deepEqual((compiled.metadata?.envelope.raw.payload as Record<string, unknown>).cashProduct, { sku: 'unsupported' });
   });
 
   it('emits a deterministic official-example semantic projection', async () => {

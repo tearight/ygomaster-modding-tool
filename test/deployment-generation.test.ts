@@ -13,7 +13,7 @@ const expected = {
   compilerVersion: 'ir-compiler/v1',
   catalogGeneration: 'catalog-a',
   idRegistryGeneration: 'registry-a',
-  targetContractVersion: 'ygomaster-campaign-target/v2',
+  targetContractVersion: 'ygomaster-campaign-target/v3',
 };
 
 describe('managed IR deployment generation guard', () => {

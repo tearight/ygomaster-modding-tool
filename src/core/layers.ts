@@ -329,7 +329,7 @@ export const validateLayerPathsOnDisk = async (
 export const LAYER_MANIFEST_VERSION = 1 as const;
 export const CONTENT_MANIFEST_FILE = 'manifest.json';
 export const IR_GENERATION_METADATA_FILE = 'generation.json';
-export const YGOMASTER_TARGET_CONTRACT_VERSION = 'ygomaster-campaign-target/v2' as const;
+export const YGOMASTER_TARGET_CONTRACT_VERSION = 'ygomaster-campaign-target/v3' as const;
 
 export interface ContentManifest {
   formatVersion: typeof LAYER_MANIFEST_VERSION;
@@ -349,6 +349,8 @@ export interface ContentManifest {
     regulations?: string;
     localization?: string;
     assets?: string;
+    runtimePolicy?: string;
+    releases?: string;
     target?: string;
   };
   sourceOfTruth: true;
@@ -364,6 +366,8 @@ export const CONTENT_DIRECTORY_DEFAULTS = Object.freeze({
   regulations: 'regulations',
   localization: 'localization',
   assets: 'assets',
+  runtimePolicy: 'runtime-policy',
+  releases: 'releases',
   target: 'target/ygomaster',
 });
 

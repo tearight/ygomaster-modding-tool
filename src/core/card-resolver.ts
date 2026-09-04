@@ -8,10 +8,20 @@ import { CatalogCard, Problem } from './types';
 export const CARD_RESOLVER_SCHEMA_VERSION = 1 as const;
 export const CARD_RESOLVER_VERSION = 'ygomaster-card-resolver/v1' as const;
 
+// YGOPro/OCG card type bits retained by the catalog. Pendulum is deliberately
+// absent: it starts in Main and can later become face-up Extra during a duel.
+export const EXTRA_DECK_CARD_TYPE_MASK = 0x40 | 0x2000 | 0x800000 | 0x4000000;
+
+export const catalogCardRequiresExtraDeck = (card: Pick<CatalogCard, 'stats'>): boolean =>
+  typeof card.stats.type === 'number' && (card.stats.type & EXTRA_DECK_CARD_TYPE_MASK) !== 0;
+
 export const CARD_RESOLVER_CODES = Object.freeze({
   NAME_INVALID: 'CARD_NAME_INVALID',
   NAME_UNRESOLVED: 'CARD_NAME_UNRESOLVED',
   NAME_AMBIGUOUS: 'CARD_NAME_AMBIGUOUS',
+  SELECTOR_INVALID: 'CARD_SELECTOR_INVALID',
+  SELECTOR_TARGET_MISSING: 'CARD_SELECTOR_TARGET_MISSING',
+  SELECTOR_NAME_MISMATCH: 'CARD_SELECTOR_NAME_MISMATCH',
   RUNTIME_UNAVAILABLE: 'CARD_RUNTIME_UNAVAILABLE',
   ALIAS_UNREVIEWED: 'CARD_ALIAS_UNREVIEWED',
   CATALOG_INVALID: 'CARD_CATALOG_INVALID',
@@ -77,7 +87,24 @@ export interface CardNameRequest {
   span?: SourceSpan;
   sourceSpan?: SourceSpan;
   jsonPointer?: string;
+  selector?: CardReferenceSelector;
 }
+
+/** A reviewed, catalog-bound escape hatch for same-name runtime variants. */
+export interface CardReferenceSelector {
+  runtimeId: number;
+  /** Human-reviewable evidence; never interpreted as another ID namespace. */
+  provenance: string;
+  /** Optional artwork/print label preserved in the resolution lock. */
+  variant?: string;
+}
+
+export interface AuthoredCardReference {
+  name: string;
+  selector?: CardReferenceSelector;
+}
+
+export type CardReferenceInput = string | AuthoredCardReference;
 
 export interface CardCandidate {
   runtimeId: number;
@@ -106,6 +133,7 @@ export interface CardResolutionLockEntry {
   /** Alias target/provenance are absent for exact official-name matches. */
   aliasOf?: string;
   aliasProvenance?: string;
+  selector?: CardReferenceSelector;
 }
 
 export interface CardResolutionLock {
@@ -216,6 +244,36 @@ const sourceSpanFor = (request: CardNameRequest): SourceSpan | undefined => requ
 
 const requestName = (request: CardNameRequest): string | undefined => request.sourceName ?? request.name;
 
+export const cardReferenceRequest = (
+  input: CardReferenceInput,
+  context: Omit<CardNameRequest, 'sourceName' | 'name' | 'selector'> = {},
+): CardNameRequest => typeof input === 'string'
+  ? { ...context, sourceName: input }
+  : { ...context, sourceName: input?.name, ...(input?.selector === undefined ? {} : { selector: input.selector }) };
+
+/**
+ * Line formats use a terminal selector suffix so the reviewed choice remains
+ * authored text: `Dark Magician @runtime=4041 @provenance=ocg-db:4041`.
+ */
+export const parseCardReferenceText = (value: string): AuthoredCardReference => {
+  const tokens = value.trim().split(/\s+/u);
+  const selectorTokens: Record<string, string> = {};
+  while (tokens.length && /^@(runtime|provenance|variant)=/u.test(tokens[tokens.length - 1] || '')) {
+    const token = tokens.pop() as string;
+    const separator = token.indexOf('=');
+    selectorTokens[token.slice(1, separator)] = token.slice(separator + 1);
+  }
+  if (!Object.keys(selectorTokens).length) return { name: value.trim() };
+  return {
+    name: tokens.join(' ').trim(),
+    selector: {
+      runtimeId: Number(selectorTokens.runtime),
+      provenance: selectorTokens.provenance || '',
+      ...(selectorTokens.variant ? { variant: selectorTokens.variant } : {}),
+    },
+  };
+};
+
 const requestSourcePath = (request: CardNameRequest): string => request.sourcePath || sourceSpanFor(request)?.sourcePath || '';
 
 const diagnosticFor = (
@@ -256,7 +314,10 @@ const requestSort = (left: { request: CardNameRequest; index: number }, right: {
     || (leftSpan?.endLine ?? Number.MAX_SAFE_INTEGER) - (rightSpan?.endLine ?? Number.MAX_SAFE_INTEGER)
     || (leftSpan?.endColumn ?? Number.MAX_SAFE_INTEGER) - (rightSpan?.endColumn ?? Number.MAX_SAFE_INTEGER)
     || compareOrdinal(requestName(left.request) || '', requestName(right.request) || '')
-    || compareOrdinal(left.request.jsonPointer || '', right.request.jsonPointer || '')
+  || compareOrdinal(left.request.jsonPointer || '', right.request.jsonPointer || '')
+    || (left.request.selector?.runtimeId ?? Number.MAX_SAFE_INTEGER) - (right.request.selector?.runtimeId ?? Number.MAX_SAFE_INTEGER)
+    || compareOrdinal(left.request.selector?.provenance || '', right.request.selector?.provenance || '')
+    || compareOrdinal(left.request.selector?.variant || '', right.request.selector?.variant || '')
     || left.index - right.index;
 };
 
@@ -308,6 +369,9 @@ const lockEntryCompare = (left: CardResolutionLockEntry, right: CardResolutionLo
   || compareOrdinal(left.matchKind, right.matchKind)
   || compareOptional(left.aliasOf, right.aliasOf)
   || compareOptional(left.aliasProvenance, right.aliasProvenance)
+  || (left.selector?.runtimeId ?? Number.MAX_SAFE_INTEGER) - (right.selector?.runtimeId ?? Number.MAX_SAFE_INTEGER)
+  || compareOrdinal(left.selector?.provenance || '', right.selector?.provenance || '')
+  || compareOrdinal(left.selector?.variant || '', right.selector?.variant || '')
   || compareOrdinal(left.jsonPointer || '', right.jsonPointer || '');
 
 export const computeCardCatalogGeneration = (cards: readonly CatalogCard[]): string => {
@@ -316,6 +380,7 @@ export const computeCardCatalogGeneration = (cards: readonly CatalogCard[]): str
       id: card.id,
       ydkId: card.ydkId,
       english: card.names.english || '',
+      type: card.stats.type ?? null,
     }))
     .sort((left, right) => left.id - right.id || left.ydkId - right.ydkId || compareOrdinal(left.english, right.english));
   const digest = createHash('sha256').update(stableStringify(identity)).digest('hex');
@@ -451,6 +516,12 @@ export class CardNameResolver {
     return uniqueCandidates(this.byNormalizedName.get(normalizedName) || []);
   }
 
+  /** Catalog-driven modern deck placement; Ritual (0x80) remains a Main card. */
+  isExtraDeckCard(runtimeId: number): boolean {
+    const card = this.cardsById.get(runtimeId);
+    return card ? catalogCardRequiresExtraDeck(card) : false;
+  }
+
   /** Fuzzy search is deliberately a suggestion API and cannot create a lock. */
   suggestCardNames(name: string, limit = this.fuzzyLimit): CardCandidate[] {
     const normalizedName = normalizeCardName(name);
@@ -502,7 +573,72 @@ export class CardNameResolver {
       return { ...base, ok: false, normalizedName, problems: [diagnosticFor(CARD_RESOLVER_CODES.NAME_INVALID, 'Card source name normalizes to empty', request)] };
     }
     const candidates = this.candidatesFor(normalizedName);
+    const selector = request.selector;
+    if (selector !== undefined && (!isRecord(selector)
+      || !validRuntimeId(selector.runtimeId)
+      || typeof selector.provenance !== 'string'
+      || !selector.provenance.trim()
+      || (selector.variant !== undefined && (typeof selector.variant !== 'string' || !selector.variant.trim())))) {
+      return {
+        ...base,
+        ok: false,
+        normalizedName,
+        candidates,
+        problems: [diagnosticFor(CARD_RESOLVER_CODES.SELECTOR_INVALID, 'Card selector requires a non-negative runtimeId and non-empty provenance; variant must be non-empty when present', request)],
+      };
+    }
     const suggestions = candidates.length ? [] : this.suggestCardNames(sourceName);
+    if (selector !== undefined) {
+      const selectedCatalogCard = this.cardsById.get(selector.runtimeId);
+      if (!selectedCatalogCard) {
+        return {
+          ...base,
+          ok: false,
+          normalizedName,
+          candidates,
+          suggestions,
+          problems: [diagnosticFor(CARD_RESOLVER_CODES.SELECTOR_TARGET_MISSING, `Card selector runtime ID ${selector.runtimeId} is absent from catalog generation ${this.catalogGeneration}`, request)],
+        };
+      }
+      const selected = candidates.filter((candidate) => candidate.runtimeId === selector.runtimeId);
+      if (!selected.length) {
+        return {
+          ...base,
+          ok: false,
+          normalizedName,
+          candidates,
+          suggestions,
+          problems: [diagnosticFor(CARD_RESOLVER_CODES.SELECTOR_NAME_MISMATCH, `Card selector runtime ID ${selector.runtimeId} does not match source name ${sourceName}; catalog name is ${selectedCatalogCard.names.english}`, request)],
+        };
+      }
+      if (!this.runtimeIds.has(selector.runtimeId)) {
+        return {
+          ...base,
+          ok: false,
+          normalizedName,
+          runtimeId: selector.runtimeId,
+          candidates,
+          suggestions: [],
+          problems: [diagnosticFor(CARD_RESOLVER_CODES.RUNTIME_UNAVAILABLE, `Selected runtime card ID ${selector.runtimeId} is unavailable in the selected runtime`, request)],
+        };
+      }
+      const match = selected.find((candidate) => candidate.kind === 'official') || selected[0];
+      const lockEntry: CardResolutionLockEntry = {
+        sourceName,
+        normalizedName,
+        runtimeId: selector.runtimeId,
+        catalogGeneration: this.catalogGeneration,
+        resolverVersion: CARD_RESOLVER_VERSION,
+        ...(request.sourcePath ? { sourcePath: request.sourcePath } : {}),
+        ...(sourceSpanFor(request) ? { sourceSpan: clone(sourceSpanFor(request)) } : {}),
+        ...(request.jsonPointer ? { jsonPointer: request.jsonPointer } : {}),
+        matchKind: match.kind === 'alias' ? 'alias' : 'exact',
+        ...(match.kind === 'alias' && match.aliasOf !== undefined ? { aliasOf: match.aliasOf } : {}),
+        ...(match.kind === 'alias' && match.aliasProvenance !== undefined ? { aliasProvenance: match.aliasProvenance } : {}),
+        selector: clone(selector),
+      };
+      return { ...base, ok: true, normalizedName, runtimeId: selector.runtimeId, match, candidates, suggestions: [], problems: [], lockEntry };
+    }
     if (!candidates.length) {
       const rejected = this.rejectedAliases.get(normalizedName);
       const code = rejected?.length ? CARD_RESOLVER_CODES.ALIAS_UNREVIEWED : CARD_RESOLVER_CODES.NAME_UNRESOLVED;
@@ -611,7 +747,12 @@ const isLockEntry = (value: unknown): value is CardResolutionLockEntry =>
   && value.resolverVersion === CARD_RESOLVER_VERSION
   && lockMatchKind(value.matchKind) !== undefined
   && (value.aliasOf === undefined || typeof value.aliasOf === 'string')
-  && (value.aliasProvenance === undefined || typeof value.aliasProvenance === 'string');
+  && (value.aliasProvenance === undefined || typeof value.aliasProvenance === 'string')
+  && (value.selector === undefined || (isRecord(value.selector)
+    && validRuntimeId(value.selector.runtimeId)
+    && typeof value.selector.provenance === 'string'
+    && value.selector.provenance.trim().length > 0
+    && (value.selector.variant === undefined || (typeof value.selector.variant === 'string' && value.selector.variant.trim().length > 0))));
 
 export const validateResolutionLock = (resolver: CardNameResolver, lock: unknown): Problem[] => {
   const problems: Problem[] = [];
@@ -639,6 +780,7 @@ export const validateResolutionLock = (resolver: CardNameResolver, lock: unknown
       sourcePath: entry.sourcePath,
       sourceSpan: entry.sourceSpan,
       jsonPointer: entry.jsonPointer,
+      ...(entry.selector ? { selector: entry.selector } : {}),
     });
     if (!resolution.ok || resolution.runtimeId === undefined) {
       problems.push(lockDiagnostic(CARD_RESOLVER_CODES.LOCK_UNRESOLVED, `Lock entry could not be resolved: ${entry.sourceName}`, entry));
@@ -654,6 +796,7 @@ export const validateResolutionLock = (resolver: CardNameResolver, lock: unknown
       || lockMatchKind(entry.matchKind) !== expectedMatchKind
       || entry.aliasOf !== expectedAliasOf
       || entry.aliasProvenance !== expectedAliasProvenance
+      || JSON.stringify(entry.selector) !== JSON.stringify(resolution.lockEntry?.selector)
     ) {
       problems.push(lockDiagnostic(CARD_RESOLVER_CODES.LOCK_RESOLUTION_CHANGED, `Lock entry changed resolution or match provenance: ${entry.sourceName}`, entry));
     }

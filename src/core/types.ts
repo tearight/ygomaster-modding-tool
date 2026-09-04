@@ -68,7 +68,7 @@ export interface SourceManifest {
     gate?: string;
     deck?: string;
     structure?: string;
-    overlay?: string;
+    target?: string;
     assets?: string;
   };
   authoring?: { language?: string };
@@ -78,7 +78,6 @@ export interface SourceManifest {
     channel?: string;
     autoDownload?: boolean;
   };
-  overlays?: string[];
   assets?: string[];
   [key: string]: JsonValue | undefined;
 }
@@ -86,6 +85,8 @@ export interface SourceManifest {
 export type DocumentType = 'gate' | 'deck' | 'structure';
 
 export interface ProjectConfig {
+  /** Root containing campaign/content, campaign/source, and campaign/id-registry.json. */
+  workspaceRoot?: string;
   gameRoot?: string;
   sourceRoot?: string;
 }
@@ -96,7 +97,7 @@ export interface WorkspacePaths {
   gateRoot: string;
   deckRoot: string;
   structureRoot: string;
-  overlayRoot: string;
+  targetRoot: string;
   assetsRoot: string;
   trashRoot: string;
 }
@@ -105,7 +106,7 @@ export interface WorkspaceInspect {
   manifest: SourceManifest;
   sourceRoot: string;
   counts: Record<DocumentType, number>;
-  paths: Pick<WorkspacePaths, 'gateRoot' | 'deckRoot' | 'structureRoot' | 'overlayRoot'>;
+  paths: Pick<WorkspacePaths, 'gateRoot' | 'deckRoot' | 'structureRoot' | 'targetRoot'>;
 }
 
 export interface PayloadSource<T extends object = JsonObject> {
@@ -258,6 +259,8 @@ export interface CatalogStatus {
   cardCount: number;
   missingRuntimeIdCount: number;
   lastUpdated?: string;
+  /** Shared resolver generation; UI adapters may attach it after loading the valid cache. */
+  generation?: string;
 }
 
 export interface CatalogRefreshResult {
@@ -300,6 +303,19 @@ export interface DeploymentMetadata {
     catalogGeneration: string;
     idRegistryGeneration: string;
     targetContractVersion: string;
+  };
+  diagnosticProfile?: {
+    id: string;
+    projectionGeneration: string;
+    soloEnvelope: 'exact' | 'preserve-runtime';
+  };
+  saveCarryover?: {
+    contract: 'ygomaster-local-save/opaque-copy-v1';
+    sourceKind: 'current' | 'legacy';
+    backupId: string;
+    generation: string;
+    fileCount: number;
+    totalBytes: number;
   };
 }
 

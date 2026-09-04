@@ -20,6 +20,7 @@ export const readConfig = async (projectRoot: string): Promise<ProjectConfig> =>
 
 export const writeConfig = async (projectRoot: string, config: ProjectConfig): Promise<ProjectConfig> => {
   const normalized: ProjectConfig = {
+    ...(config.workspaceRoot ? { workspaceRoot: path.resolve(config.workspaceRoot) } : {}),
     ...(config.gameRoot ? { gameRoot: path.resolve(config.gameRoot) } : {}),
     ...(config.sourceRoot ? { sourceRoot: path.resolve(config.sourceRoot) } : {}),
   };

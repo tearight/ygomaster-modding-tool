@@ -17,7 +17,7 @@ import { compileCampaignIr, type CampaignIrBundle } from '../src/core/ir-compile
 import { createEmptyRegistry } from '../src/core/id-registry';
 import { defaultContentManifest } from '../src/core/layers';
 import type { LocalizationCatalog } from '../src/core/localization-content';
-import { applyCampaignOverlay } from '../src/core/overlay';
+import { materializeCampaignData } from '../src/core/materialize';
 import { buildFakeRuntime } from '../src/core/pipeline-harness';
 import type { CatalogCard, Problem } from '../src/core/types';
 
@@ -91,6 +91,7 @@ const structure = {
     deck: 'decks/rental.json',
     focus: ['Fixture Card 01'],
     accessory: 'starter',
+    reward: { quantity: 1, oneCopy: true },
   },
 };
 
@@ -172,6 +173,9 @@ const makeFixture = async (): Promise<Fixture> => {
     'shop/pools/second.packlist': shopPool,
     'shop/odds/first.json': `${JSON.stringify(shopOdds, null, 2)}\n`,
     'shop/odds/second.json': `${JSON.stringify(shopOdds, null, 2)}\n`,
+    'runtime-policy/settings.json': `${JSON.stringify({ payload: { DefaultGems: 1000, DisableBanList: false } }, null, 2)}\n`,
+    'runtime-policy/shop.json': `${JSON.stringify({ payload: { NoDuplicatesPerPack: true } }, null, 2)}\n`,
+    'runtime-policy/client.json': `${JSON.stringify({ payload: { DuelClientTimeMultiplier: 2 } }, null, 2)}\n`,
   };
   for (const [relative, value] of Object.entries(files)) {
     const target = path.join(contentRoot, ...relative.split('/'));
@@ -223,7 +227,8 @@ const makeFixture = async (): Promise<Fixture> => {
         oddsSourcePath: 'shop/odds/second.json',
       },
     ],
-    consumedSourcePaths: ['localization/en.json', 'assets/accessories.json', 'assets/manifest.json', 'assets/background.png'],
+    runtimePolicy: { settings: { DefaultGems: 1000, DisableBanList: false }, shop: { NoDuplicatesPerPack: true }, client: { DuelClientTimeMultiplier: 2 } },
+    consumedSourcePaths: ['localization/en.json', 'assets/accessories.json', 'assets/manifest.json', 'assets/background.png', 'runtime-policy/settings.json', 'runtime-policy/shop.json', 'runtime-policy/client.json'],
   };
   return { root, contentRoot, irRoot, bundle };
 };
@@ -242,6 +247,103 @@ const treeBytes = async (root: string): Promise<Record<string, string>> => {
 };
 
 describe('integrated content to Modding Tool IR compiler', () => {
+  it('does not compile nested physical Deck sources under the logical-folder contract', async () => {
+    const fixture = await makeFixture();
+    try {
+      const resolver = createCardResolver(catalog, { catalogGeneration: 'catalog-nested-deck-fixture' });
+      const options = {
+        projectRoot: fixture.root,
+        contentRoot: fixture.contentRoot,
+        irRoot: fixture.irRoot,
+        resolver,
+        catalogGeneration: resolver.catalogGeneration,
+        registry: createEmptyRegistry(),
+        deckOptions: { extraDeckCardIds: new Set<number>() },
+      };
+      const published = await compileCampaignContent(options);
+      assert.equal(published.ok, true, JSON.stringify(published.problems));
+      assert.equal(published.published, true);
+      const before = await treeBytes(fixture.irRoot);
+      const nestedPath = path.join(fixture.contentRoot, 'decks', 'nested', 'rogue.decklist');
+      await fs.mkdir(path.dirname(nestedPath), { recursive: true });
+      await fs.writeFile(nestedPath, deckSource, 'utf8');
+      await fs.writeFile(path.join(fixture.contentRoot, 'decks', 'nested', 'rogue.json'), `${JSON.stringify({ metadata: { identity: { formatVersion: 1, reference: 'deck:rogue-stable' }, role: 'cpu', folder: 'deck-folder:not-projected', unknown: { keep: true } } })}\n`, 'utf8');
+      const compiled = await compileCampaignContent(options);
+      assert.equal(compiled.ok, false);
+      assert.equal(compiled.published, false);
+      assert.equal(compiled.problems.some((entry) => entry.code === 'IR_COMPILER_SOURCE_UNTRACKED' && (entry.sourcePath || entry.path) === 'decks/nested/rogue.decklist'), true);
+      assert.equal(compiled.problems.some((entry) => entry.code === 'IR_COMPILER_SOURCE_UNTRACKED' && (entry.sourcePath || entry.path) === 'decks/nested/rogue.json'), true);
+      assert.deepEqual(await treeBytes(fixture.irRoot), before);
+    } finally {
+      await fs.rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it('injects catalog-driven Extra legality into Duel and Structure compilation', async () => {
+    const fixture = await makeFixture();
+    try {
+      const fusion = {
+        ...catalog[0],
+        id: 2000,
+        ydkId: 600000,
+        names: { english: 'Fixture Fusion', display: 'Fixture Fusion' },
+        stats: { type: 0x41 },
+        autoTags: ['type:monster', 'type:fusion'],
+      } satisfies CatalogCard;
+      const validSource = deckSource.replace('[extra]\n', '[extra]\n1 Fixture Fusion\n');
+      const fixtureRegulation = fixture.bundle.regulations?.[0];
+      if (!fixtureRegulation || typeof fixtureRegulation.rules !== 'string') throw new Error('Fixture regulation is missing');
+      const validRegulation = {
+        ...fixtureRegulation,
+        rules: fixtureRegulation.rules.replace('[forbidden]', '3 Fixture Fusion\n[forbidden]'),
+      };
+      const validBundle: CampaignIrBundle = {
+        ...fixture.bundle,
+        decks: fixture.bundle.decks.map((entry) => ({ ...entry, source: validSource })),
+        regulations: [validRegulation],
+      };
+      await Promise.all([
+        fs.writeFile(path.join(fixture.contentRoot, 'decks/cpu.decklist'), validSource, 'utf8'),
+        fs.writeFile(path.join(fixture.contentRoot, 'decks/rental.decklist'), validSource, 'utf8'),
+        fs.writeFile(path.join(fixture.contentRoot, 'regulations/demo.regulation'), validRegulation.rules, 'utf8'),
+      ]);
+      const resolver = createCardResolver([...catalog, fusion], { catalogGeneration: 'catalog-extra-fixture' });
+      const valid = await compileCampaignIr({
+        projectRoot: fixture.root,
+        contentRoot: fixture.contentRoot,
+        irRoot: fixture.irRoot,
+        resolver,
+        catalogGeneration: resolver.catalogGeneration,
+        registry: createEmptyRegistry(),
+        bundle: validBundle,
+        checkOnly: true,
+      });
+      assert.equal(valid.ok, true, JSON.stringify(valid.problems));
+      assert.deepEqual(valid.deckProjections?.['decks/cpu.json'].e.ids, [2000]);
+      assert.deepEqual(valid.structureProjections?.[0]?.document.contents.e.ids, [2000]);
+
+      const invalidSource = deckSource.replace('[main]\n', '[main]\n1 Fixture Fusion\n');
+      await Promise.all([
+        fs.writeFile(path.join(fixture.contentRoot, 'decks/cpu.decklist'), invalidSource, 'utf8'),
+        fs.writeFile(path.join(fixture.contentRoot, 'decks/rental.decklist'), invalidSource, 'utf8'),
+      ]);
+      const invalid = await compileCampaignIr({
+        projectRoot: fixture.root,
+        contentRoot: fixture.contentRoot,
+        irRoot: fixture.irRoot,
+        resolver,
+        catalogGeneration: resolver.catalogGeneration,
+        registry: createEmptyRegistry(),
+        bundle: { ...validBundle, decks: validBundle.decks.map((entry) => ({ ...entry, source: invalidSource })) },
+        checkOnly: true,
+      });
+      assert.equal(invalid.ok, false);
+      assert.equal(invalid.problems.some((problem) => problem.code === 'DECK_MAIN_CARD_INVALID'), true);
+    } finally {
+      await fs.rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
   it('uses the approved Structure adapter without a caller flag while keeping check-only/read-only and zero-diff guarantees', async () => {
     const fixture = await makeFixture();
     try {
@@ -275,14 +377,22 @@ describe('integrated content to Modding Tool IR compiler', () => {
       assert.equal(discovered.published, false);
       const checked = await compileCampaignIr({ ...common, checkOnly: true });
       assert.equal(checked.ok, true, JSON.stringify(checked.problems));
+      assert.equal(checked.problems.some((entry) => entry.severity === 'warning'), false);
+      assert.equal(checked.warnings.some((entry) => entry.code === 'STRUCTURE_REWARD_ONE_COPY_ASSUMED'), true);
       assert.equal(checked.published, false);
+      assert.equal(await fs.stat(fixture.irRoot).then(() => true, () => false), false);
+
+      const staleReviewedPlan = await compileCampaignIr({ ...common, expectedOutputRegistryGeneration: 'stale-reviewed-plan' });
+      assert.equal(staleReviewedPlan.ok, false);
+      assert.equal(staleReviewedPlan.published, false);
+      assert.equal(staleReviewedPlan.problems[0]?.code, 'ID_REGISTRY_STALE_PLAN');
       assert.equal(await fs.stat(fixture.irRoot).then(() => true, () => false), false);
 
       const published = await compileCampaignIr(common);
       assert.equal(published.ok, true, JSON.stringify(published.problems));
       assert.equal(published.published, true);
       const structureFile = `structure/${path.posix.basename(published.structureProjections?.[0]?.path || '')}`;
-      for (const relative of ['manifest.json', 'generation.json', 'provenance.json', 'gate/demo.json', 'deck/decks/cpu.json', 'deck/decks/rental.json', structureFile, 'overlay/Shop.json', 'overlay/ShopPackOdds.json']) {
+      for (const relative of ['manifest.json', 'generation.json', 'provenance.json', 'gate/demo.json', 'deck/decks/cpu.json', 'deck/decks/rental.json', structureFile, 'target/ygomaster/Data/Shop.json', 'target/ygomaster/Data/ShopPackOdds.json', 'target/ygomaster/Data/Settings.json', 'target/ygomaster/Data/Shop.policy.json', 'target/ygomaster/Data/ClientData/ClientSettings.json']) {
         assert.equal(await fs.stat(path.join(fixture.irRoot, ...relative.split('/'))).then(() => true, () => false), true, relative);
       }
       const before = await treeBytes(fixture.irRoot);
@@ -290,16 +400,20 @@ describe('integrated content to Modding Tool IR compiler', () => {
         root: path.join(fixture.root, 'runtime'),
         files: {
           'Data/Solo.json': { Master: { Solo: { gate: {}, chapter: {}, unlock: {}, unlock_item: {}, reward: {} } } },
-          'Data/Shop.json': { runtimeUnknown: true, PackShop: {} },
+          'Data/Shop.json': { runtimeUnknown: true, PackShop: { '1': { packId: 1 } }, StructureShop: { '2': {} } },
           'Data/ShopPackOdds.json': [],
+          'Data/Settings.json': { DefaultGems: 0, runtimeUnknown: true },
+          'Data/ClientData/ClientSettings.json': { DuelClientTimeMultiplier: 1, runtimeUnknown: true },
         },
       });
-      const overlay = await applyCampaignOverlay(fixture.irRoot, runtime.root, { projectRoot: fixture.root });
-      assert.equal(overlay.changedFiles.includes('Data/Solo.json'), true);
-      assert.equal(overlay.changedFiles.some((entry) => entry.startsWith('Data/SoloDuels/')), true);
-      assert.equal(overlay.changedFiles.some((entry) => entry.startsWith('Data/StructureDecks/')), true);
-      assert.equal(overlay.changedFiles.includes('Data/Shop.json'), true);
-      assert.equal(overlay.changedFiles.includes('Data/ShopPackOdds.json'), true);
+      const materialized = await materializeCampaignData(fixture.irRoot, runtime.root, { projectRoot: fixture.root });
+      assert.equal(materialized.changedFiles.includes('Data/Solo.json'), true);
+      assert.equal(materialized.changedFiles.some((entry) => entry.startsWith('Data/SoloDuels/')), true);
+      assert.equal(materialized.changedFiles.some((entry) => entry.startsWith('Data/StructureDecks/')), true);
+      assert.equal(materialized.changedFiles.includes('Data/Shop.json'), true);
+      assert.equal(materialized.changedFiles.includes('Data/ShopPackOdds.json'), true);
+      assert.equal(materialized.changedFiles.includes('Data/Settings.json'), true);
+      assert.equal(materialized.changedFiles.includes('Data/ClientData/ClientSettings.json'), true);
       const deployedShop = JSON.parse(await fs.readFile(path.join(runtime.root, 'Data', 'Shop.json'), 'utf8')) as { runtimeUnknown: boolean; PackShop: Record<string, { unlockSecrets: number[] }> };
       const shopIds = Object.keys(deployedShop.PackShop).sort();
       assert.equal(deployedShop.runtimeUnknown, true);
@@ -311,13 +425,103 @@ describe('integrated content to Modding Tool IR compiler', () => {
       );
       const deployedOdds = JSON.parse(await fs.readFile(path.join(runtime.root, 'Data', 'ShopPackOdds.json'), 'utf8')) as unknown[];
       assert.deepEqual(deployedOdds, (published.shopProjections || []).map((entry) => entry.oddsEntry));
-      assert.equal(overlay.changedFiles.includes('Data/ClientData/IDS/IDS_SOLO.txt'), true);
+      assert.deepEqual(JSON.parse(await fs.readFile(path.join(runtime.root, 'Data', 'Settings.json'), 'utf8')), { DefaultGems: 1000, DisableBanList: false, runtimeUnknown: true });
+      assert.deepEqual(JSON.parse(await fs.readFile(path.join(runtime.root, 'Data', 'ClientData', 'ClientSettings.json'), 'utf8')), { DuelClientTimeMultiplier: 2, runtimeUnknown: true });
+      assert.equal(materialized.changedFiles.includes('Data/ClientData/IDS/IDS_SOLO.txt'), true);
       const repeated = await compileCampaignIr(common);
       assert.equal(repeated.ok, true, JSON.stringify(repeated.problems));
       assert.equal(repeated.zeroDiff, true);
       assert.equal(repeated.published, false);
       assert.deepEqual(await treeBytes(fixture.irRoot), before);
       assert.equal(repeated.provenance?.sources.some((entry) => entry.path === 'gates/demo.json'), true);
+    } finally {
+      await fs.rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves symbolic authored deck identities while emitting physical legacy adapter paths', async () => {
+    const fixture = await makeFixture();
+    try {
+      const symbolicGate = JSON.parse(JSON.stringify(gate)) as typeof gate;
+      symbolicGate.payload.chapters[0].duel.cpuDeck = 'deck:cpu';
+      symbolicGate.payload.chapters[0].duel.rentalDeck = 'deck:rental';
+      await fs.writeFile(path.join(fixture.contentRoot, 'gates', 'demo.json'), `${JSON.stringify(symbolicGate, null, 2)}\n`, 'utf8');
+
+      const compiled = await compileCampaignContent({
+        projectRoot: fixture.root,
+        contentRoot: fixture.contentRoot,
+        irRoot: fixture.irRoot,
+        resolver: createCardResolver(catalog, { catalogGeneration: 'catalog-fixture' }),
+        catalogGeneration: 'catalog-fixture',
+        registry: createEmptyRegistry(),
+        deckOptions: { extraDeckCardIds: new Set<number>() },
+      });
+      assert.equal(compiled.ok, true, JSON.stringify(compiled.problems));
+      const sourceChapter = (compiled.gateProjection?.sourceFiles['gate/demo.json']?.chapters as Array<Record<string, unknown>>)[0];
+      assert.equal(sourceChapter?.cpu_deck, 'decks/cpu.json');
+      assert.equal(sourceChapter?.rental_deck, 'decks/rental.json');
+      assert.equal(await fs.stat(path.join(fixture.irRoot, 'deck', 'decks', 'cpu.json')).then(() => true, () => false), true);
+
+      const chapterId = Number(Object.keys(compiled.gateProjection?.duels || {})[0]);
+      const duel = compiled.gateProjection?.duels[String(chapterId)]?.Duel as {
+        Deck: Array<{ Main: { CardIds: number[] } }>;
+      };
+      assert.deepEqual(duel.Deck[0]?.Main.CardIds, catalog.map((card) => card.id));
+      assert.deepEqual(duel.Deck[1]?.Main.CardIds, catalog.map((card) => card.id));
+    } finally {
+      await fs.rm(fixture.root, { recursive: true, force: true });
+    }
+  });
+
+  it('validates logical Gate Deck scope while excluding folder metadata from IR and target projections', async () => {
+    const fixture = await makeFixture();
+    try {
+      const folderCatalog = {
+        formatVersion: 1,
+        kind: 'deck-folders',
+        payload: { folders: [
+          { id: 'deck-folder:shared', name: 'Shared' },
+          { id: 'deck-folder:demo', name: 'Demo', parent: 'deck-folder:shared' },
+        ] },
+      };
+      const scopedGate = JSON.parse(JSON.stringify(gate)) as typeof gate & { payload: typeof gate.payload & { deckFolder: string } };
+      scopedGate.payload.deckFolder = 'deck-folder:demo';
+      scopedGate.payload.chapters[0].duel.cpuDeck = 'deck:cpu';
+      scopedGate.payload.chapters[0].duel.rentalDeck = 'deck:rental';
+      await Promise.all([
+        fs.writeFile(path.join(fixture.contentRoot, 'decks', '_folders.json'), `${JSON.stringify(folderCatalog, null, 2)}\n`, 'utf8'),
+        fs.writeFile(path.join(fixture.contentRoot, 'decks', 'cpu.json'), `${JSON.stringify({ metadata: { role: 'cpu', folder: 'deck-folder:demo', future: { preserved: true } }, unknownTopLevel: true }, null, 2)}\n`, 'utf8'),
+        fs.writeFile(path.join(fixture.contentRoot, 'decks', 'rental.json'), `${JSON.stringify({ metadata: { role: 'rental', folder: 'deck-folder:demo' } }, null, 2)}\n`, 'utf8'),
+        fs.writeFile(path.join(fixture.contentRoot, 'gates', 'demo.json'), `${JSON.stringify(scopedGate, null, 2)}\n`, 'utf8'),
+      ]);
+      const options = {
+        projectRoot: fixture.root,
+        contentRoot: fixture.contentRoot,
+        irRoot: fixture.irRoot,
+        resolver: createCardResolver(catalog, { catalogGeneration: 'catalog-fixture' }),
+        catalogGeneration: 'catalog-fixture',
+        registry: createEmptyRegistry(),
+        deckOptions: { extraDeckCardIds: new Set<number>() },
+      };
+      const first = await compileCampaignContent(options);
+      assert.equal(first.ok, true, JSON.stringify(first.problems));
+      assert.equal(first.deckProjections?.['decks/cpu.json'] !== undefined, true);
+      assert.equal(JSON.stringify(first.deckProjections).includes('deck-folder:'), false);
+      assert.equal(JSON.stringify(first.gateProjection).includes('deck-folder:'), false);
+      const tree = await treeBytes(fixture.irRoot);
+      assert.equal(Object.keys(tree).some((entry) => entry.endsWith('/_folders.json') || entry === '_folders.json'), false);
+      const decodedTree = Object.values(tree).map((entry) => Buffer.from(entry, 'base64').toString('utf8')).join('\n');
+      assert.equal(decodedTree.includes('deck-folder:demo'), false);
+      assert.equal(decodedTree.includes('future'), false);
+
+      const movedCatalog = JSON.parse(JSON.stringify(folderCatalog)) as typeof folderCatalog;
+      movedCatalog.payload.folders[1] = { id: 'deck-folder:demo', name: 'Renamed Demo' };
+      await fs.writeFile(path.join(fixture.contentRoot, 'decks', '_folders.json'), `${JSON.stringify(movedCatalog, null, 2)}\n`, 'utf8');
+      const second = await compileCampaignContent({ ...options, registry: createEmptyRegistry(), checkOnly: true });
+      assert.equal(second.ok, true, JSON.stringify(second.problems));
+      assert.deepEqual(second.deckProjections, first.deckProjections);
+      assert.deepEqual(second.gateProjection?.solo, first.gateProjection?.solo);
+      assert.deepEqual(second.gateProjection?.duels, first.gateProjection?.duels);
     } finally {
       await fs.rm(fixture.root, { recursive: true, force: true });
     }

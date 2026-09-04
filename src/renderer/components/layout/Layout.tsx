@@ -1,6 +1,5 @@
 import { makeStyles, tokens } from '@fluentui/react-components';
-import { Outlet } from 'react-router-dom';
-
+import { CampaignWorkspaceBoundary } from './CampaignWorkspaceBoundary';
 import { MenuBar } from './MenuBar';
 
 const useStyles = makeStyles({
@@ -31,7 +30,7 @@ export const Layout = () => {
         <MenuBar />
       </div>
       <div className={classes.contents}>
-        <Outlet />
+        <CampaignWorkspaceBoundary />
       </div>
     </div>
   );

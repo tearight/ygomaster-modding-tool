@@ -12,7 +12,7 @@ import {
   parseGateContent,
   validateGateContent,
 } from '../src/core/gate-content';
-import { applyCampaignOverlay } from '../src/core/overlay';
+import { materializeCampaignData } from '../src/core/materialize';
 import { buildFakeRuntime } from '../src/core/pipeline-harness';
 import { defaultManifest } from '../src/core/manifest';
 import { createLocalizationCatalog } from '../src/core/localization-content';
@@ -56,6 +56,20 @@ describe('GAT-001 versioned symbolic Gate content', () => {
     assert.deepEqual(parsed.document.original.envelope.payload, (await successInput()).payload);
   });
 
+  it('parses authoring-only deckFolder without projecting it to Gate IR or YgoMaster target data', async () => {
+    const input = await successInput();
+    (input.payload as Record<string, unknown>).deckFolder = 'deck-folder:Chronicle';
+    const parsed = parseGateContent(input, 'deck-folder.json');
+    assert.ok(parsed.document);
+    assert.equal(parsed.document.gate.deckFolder, 'deck-folder:chronicle');
+    const compiled = compileGateContent(parsed.document, await fixtureOptions());
+    assert.equal(compiled.ok, true, JSON.stringify(compiled.problems));
+    const ir = assertGateCompilation(compiled);
+    assert.equal(Object.prototype.hasOwnProperty.call(ir.sourceFiles['gate/chronicle.json'] || {}, 'deckFolder'), false);
+    assert.equal(JSON.stringify(ir.solo).includes('deckFolder'), false);
+    assert.equal(JSON.stringify(ir.duels).includes('deckFolder'), false);
+  });
+
   it('allocates Gate/chapter/reward/structure IDs deterministically and builds target-compatible IR', async () => {
     const parsed = parseGateContent(await successInput(), 'success/gate.json');
     assert.ok(parsed.document);
@@ -67,16 +81,20 @@ describe('GAT-001 versioned symbolic Gate content', () => {
     const ir = assertGateCompilation(first);
     const secondIr = assertGateCompilation(second);
     assert.equal(gateIrSemanticEqual(ir, secondIr), true);
-    assert.equal(first.registry?.namespaces.gate.assignments.chronicle?.id, 90000);
+    assert.equal(first.registry?.namespaces.gate.assignments.chronicle?.id, 100);
     assert.equal(Object.keys(ir.solo.gate).length, 1);
     assert.equal(Object.keys(ir.duels).length, 2);
     assert.equal(Object.values(ir.solo.gate)[0]?.illust_id, 4027);
+    assert.equal(Object.values(ir.solo.gate)[0]?.category, 1);
+    assert.equal(Object.values(ir.solo.gate)[0]?.open_date, -2208988800);
     const rewardId = Object.keys(ir.solo.reward)[0];
     assert.deepEqual(ir.rewardItems[rewardId]?.map((item) => item.category), [1, 2, 12]);
     assert.equal(first.registry?.namespaces.structure.assignments.starter?.id, 1129000);
     assert.equal(Object.values(ir.duels).some((duel) => (duel.Duel as Record<string, unknown>).difficulty === 2), true);
     const sourceGate = ir.sourceFiles['gate/chronicle.json'];
     assert.equal(sourceGate?.illust_id, 4027);
+    assert.equal(sourceGate?.category, 1);
+    assert.equal(sourceGate?.open_date, -2208988800);
     const sourceChapters = sourceGate?.chapters as Array<Record<string, unknown>>;
     assert.deepEqual(sourceChapters.map((chapter) => chapter.begin_sn), ['', '', '', '']);
     assert.equal(sourceChapters.some((chapter) => chapter.description === 'Start the duel.'), true);
@@ -85,7 +103,7 @@ describe('GAT-001 versioned symbolic Gate content', () => {
     const bossId = first.registry?.namespaces.chapter.assignments.boss?.id as number;
     assert.equal(sourceChapters.find((chapter) => chapter.id === bossId % 10000)?.difficulty, 2);
     for (const chapterId of Object.keys(ir.duels).map(Number)) {
-      assert.equal(Math.floor(chapterId / 10000), 90000);
+      assert.equal(Math.floor(chapterId / 10000), 100);
       assert.ok(chapterId % 10000 >= 1);
     }
     assert.equal(Object.values(ir.sourceFiles).every((file) => typeof file.id === 'number'), true);
@@ -113,6 +131,21 @@ describe('GAT-001 versioned symbolic Gate content', () => {
     assert.equal(sourceBoss.rental_reward, undefined);
   });
 
+  it('projects symbolic TCG unlockSecrets to the runtime chapter field', async () => {
+    const input = await successInput();
+    const firstChapter = ((input.payload as Record<string, unknown>).chapters as Array<Record<string, unknown>>)[0] as Record<string, unknown>;
+    firstChapter.unlockSecrets = ['shop:next-pack'];
+    const parsed = parseGateContent(input, 'unlock-secrets.json');
+    assert.ok(parsed.document);
+    const compiled = compileGateContent(parsed.document, { ...(await fixtureOptions()), shopIds: { 'shop:next-pack': 1130001 } });
+    assert.equal(compiled.ok, true, JSON.stringify(compiled.problems));
+    const ir = assertGateCompilation(compiled);
+    const openingId = compiled.registry?.namespaces.chapter.assignments.opening?.id as number;
+    assert.equal(ir.solo.chapter['100']?.[String(openingId)]?.unlock_secret, '1130001');
+    const source = ir.sourceFiles['gate/chronicle.json']?.chapters as Array<Record<string, unknown>>;
+    assert.equal(source.find((chapter) => chapter.id === openingId % 10000)?.unlock_secret, '1130001');
+  });
+
   it('detects unknown/numeric fields, graph defects, unreachable required chapters, and path escapes', async () => {
     const unknown = parseGateContent(await readJson('invalid/unknown-field.json'), 'invalid/unknown-field.json');
     assert.equal(codes(unknown.problems).has(GATE_CONTENT_CODES.FIELD_UNKNOWN), true);
@@ -120,7 +153,7 @@ describe('GAT-001 versioned symbolic Gate content', () => {
     const numeric = parseGateContent({
       formatVersion: 1,
       kind: 'gate',
-      payload: { id: 90000, nameKey: 'gate.chronicle.name', descriptionKey: 'gate.chronicle.description', goal: 'chapter:one', chapters: [] },
+      payload: { id: 100, nameKey: 'gate.chronicle.name', descriptionKey: 'gate.chronicle.description', goal: 'chapter:one', chapters: [] },
     }, 'numeric.json');
     assert.equal(codes(numeric.problems).has(GATE_CONTENT_CODES.NUMERIC_ID_FORBIDDEN), true);
 
@@ -240,8 +273,8 @@ describe('GAT-001 versioned symbolic Gate content', () => {
   });
 });
 
-describe('GAT-001 additive fake-runtime projection', () => {
-  it('applies the compiled Gate/Duel source through the existing overlay adapter', async () => {
+describe('GAT-001 authoritative fake-runtime projection', () => {
+  it('materializes the compiled Gate/Duel source through the Data adapter', async () => {
     const parsed = parseGateContent(await successInput(), 'success/gate.json');
     assert.ok(parsed.document);
     const options = await fixtureOptions();
@@ -255,13 +288,13 @@ describe('GAT-001 additive fake-runtime projection', () => {
         mkdir(path.join(sourceRoot, 'gate'), { recursive: true }),
         mkdir(deckRoot, { recursive: true }),
         mkdir(path.join(sourceRoot, 'structure'), { recursive: true }),
-        mkdir(path.join(sourceRoot, 'overlay'), { recursive: true }),
+        mkdir(path.join(sourceRoot, 'target', 'ygomaster', 'Data', 'ClientData', 'SoloGateBackgrounds'), { recursive: true }),
       ]);
       await writeFile(path.join(sourceRoot, 'manifest.json'), `${JSON.stringify(defaultManifest(), null, 2)}\n`, 'utf8');
       for (const [relative, value] of Object.entries(ir.sourceFiles)) {
         const source = JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
         if (Array.isArray(source.chapters)) {
-          // Exercise the overlay boundary against stale source data from the
+          // Exercise the Data boundary against stale source data from the
           // pre-fix compiler; runtime output must still be non-Scenario.
           source.chapters.forEach((chapter) => {
             if (chapter && typeof chapter === 'object') (chapter as Record<string, unknown>).begin_sn = 'stale scenario';
@@ -272,25 +305,43 @@ describe('GAT-001 additive fake-runtime projection', () => {
       for (const deck of ['cpu.json', 'rental.json', 'boss.json']) {
         await writeFile(path.join(deckRoot, deck), await readSource(`decks/${deck}`), 'utf8');
       }
+      const gateId = compiled.registry?.namespaces.gate.assignments.chronicle?.id as number;
+      await writeFile(path.join(sourceRoot, 'target', 'ygomaster', 'Data', 'Shop.json'), JSON.stringify({ PackShop: {} }), 'utf8');
+      await writeFile(path.join(sourceRoot, 'target', 'ygomaster', 'Data', 'ShopPackOdds.json'), JSON.stringify({ entries: [] }), 'utf8');
+      await writeFile(path.join(sourceRoot, 'target', 'ygomaster', 'Data', 'ClientData', 'SoloGateBackgrounds', `${gateId}.png`), new Uint8Array());
       const runtime = await buildFakeRuntime({
         root: path.join(workspaceRoot, 'runtime'),
         files: {
-          'Data/Solo.json': { Master: { Solo: { gate: {}, chapter: {}, unlock: {}, unlock_item: {}, reward: {} } } },
+          'Data/Solo.json': { Master: { Solo: { gate: { '1': {} }, chapter: {}, unlock: {}, unlock_item: {}, reward: {} } } },
+          'Data/Shop.json': { keep: true, PackShop: { '1': {} }, StructureShop: { '2': {} } },
+          'Data/ShopPackOdds.json': [{ name: 'baseline' }],
         },
       });
-      const applied = await applyCampaignOverlay(sourceRoot, runtime.root, { projectRoot: workspaceRoot });
+      const applied = await materializeCampaignData(sourceRoot, runtime.root, { projectRoot: workspaceRoot });
       assert.ok(applied.changedFiles.includes('Data/Solo.json'));
       const solo = JSON.parse(await readFile(path.join(runtime.root, 'Data/Solo.json'), 'utf8')) as {
-        Master: { Solo: { gate: Record<string, unknown>; chapter: Record<string, Record<string, unknown>> } };
+        Master: { Solo: { gate: Record<string, unknown>; chapter: Record<string, Record<string, unknown>>; unlock: Record<string, unknown>; unlock_item: Record<string, unknown> } };
       };
       const soloPayload = solo.Master.Solo;
-      const gateId = compiled.registry?.namespaces.gate.assignments.chronicle?.id as number;
       const goalId = compiled.registry?.namespaces.chapter.assignments.boss?.id as number;
       assert.ok(soloPayload.gate[String(gateId)]);
       assert.ok(soloPayload.chapter[String(gateId)][String(goalId)]);
+      const targetGate = soloPayload.gate[String(gateId)] as Record<string, unknown>;
+      assert.equal(targetGate.parent_gate, 0);
+      assert.equal(targetGate.parent_id, undefined);
       const targetChapter = soloPayload.chapter[String(gateId)][String(goalId)] as Record<string, unknown>;
       assert.equal(targetChapter.difficulty, 2);
       assert.equal(targetChapter.begin_sn, '');
+      assert.equal(targetChapter.cpu_deck, undefined);
+      assert.equal(targetChapter.rental_deck, undefined);
+      const generatedSourceGate = ir.sourceFiles['gate/chronicle.json'] as Record<string, unknown>;
+      const generatedSourceChapters = generatedSourceGate.chapters as Array<Record<string, unknown>>;
+      const unlockSource = generatedSourceChapters.find((chapter) => chapter.type === 'Unlock') as Record<string, unknown>;
+      const unlockChapterId = gateId * 10000 + Number(unlockSource.id);
+      const unlockChapter = soloPayload.chapter[String(gateId)][String(unlockChapterId)] as Record<string, unknown>;
+      assert.equal(typeof unlockChapter.unlock_id === 'number' && unlockChapter.unlock_id > 0, true);
+      assert.deepEqual(soloPayload.unlock_item, {});
+      assert.equal(JSON.stringify(soloPayload.unlock).includes(String(gateId * 10000 + 2)), true);
       const duel = JSON.parse(await readFile(path.join(runtime.root, 'Data', 'SoloDuels', `${goalId}.json`), 'utf8')) as {
         Duel: { chapter: number; Deck: Array<{ Main: { CardIds: number[] } }> };
       };

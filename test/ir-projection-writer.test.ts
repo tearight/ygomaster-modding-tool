@@ -17,7 +17,7 @@ const makeRoot = (): Promise<string> => fs.mkdtemp(path.join(os.tmpdir(), 'ir-pr
 const manifest = {
   formatVersion: 1,
   campaign: { name: 'Projection Fixture', slug: 'projection-fixture', version: '1.0.0' },
-  directories: { gate: 'gate', deck: 'deck', structure: 'structure', overlay: 'overlay' },
+  directories: { gate: 'gate', deck: 'deck', structure: 'structure', target: 'target/ygomaster' },
   unknownRoot: { preserve: true },
 };
 
@@ -27,7 +27,7 @@ const generation: IRGenerationMetadata = {
   compilerVersion: 'compiler-1',
   catalogGeneration: 'catalog-1',
   idRegistryGeneration: 'registry-1',
-  targetContractVersion: 'ygomaster-campaign-target/v2',
+  targetContractVersion: 'ygomaster-campaign-target/v3',
 };
 
 const deck = {
@@ -39,7 +39,7 @@ const deck = {
 const gate: GateCompileIR = {
   formatVersion: 1,
   kind: 'gate-ir' as const,
-  targetContractVersion: 'ygomaster-campaign-target/v2',
+  targetContractVersion: 'ygomaster-campaign-target/v3',
   registryGeneration: 'registry-1',
   solo: { gate: {}, chapter: {}, unlock: {}, unlock_item: {}, reward: {} },
   duels: {},
@@ -67,7 +67,7 @@ const baseInput = (stagingRoot: string): IrProjectionWriterInput => ({
   structures: [structure],
   structureDecks: { 'Data/StructureDecks/1129001.json': 'chronicle.json' },
   structureMetadata: { 'Data/StructureDecks/1129001.json': { name: 'Chronicle', description: 'Fixture' } },
-  overlay: {
+  target: {
     'Data/ClientData/IDS/IDS_SOLO.txt': '[IDS_SOLO.GATE001]\nChronicle\n',
     'Data/ClientData/SoloGateCards.txt': '90001,4027,0,0\n',
   },
@@ -100,12 +100,12 @@ describe('IR projection writer', () => {
         'gate/chronicle.json',
         'generation.json',
         'manifest.json',
-        'overlay/ClientData/IDS/IDS_SOLO.txt',
-        'overlay/ClientData/SoloGateCards.txt',
         'provenance.json',
         'structure/1129001.json',
+        'target/ygomaster/Data/ClientData/IDS/IDS_SOLO.txt',
+        'target/ygomaster/Data/ClientData/SoloGateCards.txt',
       ]);
-      assert.equal(await fs.readFile(path.join(root, 'overlay/ClientData/IDS/IDS_SOLO.txt'), 'utf8'), '[IDS_SOLO.GATE001]\nChronicle\n');
+      assert.equal(await fs.readFile(path.join(root, 'target/ygomaster/Data/ClientData/IDS/IDS_SOLO.txt'), 'utf8'), '[IDS_SOLO.GATE001]\nChronicle\n');
       assert.equal((JSON.parse(await fs.readFile(path.join(root, 'manifest.json'), 'utf8')) as { unknownRoot: { preserve: boolean } }).unknownRoot.preserve, true);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
@@ -194,7 +194,7 @@ describe('IR projection writer', () => {
       const right = await writeIrProjection({
         ...baseInput(second),
         decks: { 'chronicle.json': deck },
-        overlay: {
+        target: {
           'Data/ClientData/SoloGateCards.txt': '90001,4027,0,0\n',
           'Data/ClientData/IDS/IDS_SOLO.txt': '[IDS_SOLO.GATE001]\nChronicle\n',
         },

@@ -40,12 +40,32 @@ import {
   CONTENT_INSPECT,
   CONTENT_RESOLVE,
   CONTENT_REVEAL_SOURCE,
+  CONTENT_DOCUMENT_LIST,
+  CONTENT_DOCUMENT_READ,
+  CONTENT_DOCUMENT_MUTATE,
+  CONTENT_DECK_PREVIEW,
+  CONTENT_DECK_WORKSPACE_READ,
+  CONTENT_DECK_FOLDERS_BOOTSTRAP,
+  CONTENT_SHOP_READ,
+  CONTENT_SHOP_MUTATE,
+  CONTENT_STRUCTURE_MUTATE,
+  CONTENT_REGULATION_READ,
+  CONTENT_REGULATION_MUTATE,
+  CONTENT_LOCALIZATION_ASSET_INSPECT,
+  CONTENT_LOCALIZATION_ASSET_MUTATE,
+  CONTENT_RUNTIME_POLICY_READ,
+  CONTENT_RUNTIME_POLICY_WRITE,
   CONTENT_VALIDATE,
   CATALOG_REFRESH,
   CATALOG_SEARCH,
   CATALOG_STATUS,
+  CATALOG_CUSTOM_VALIDATE,
+  CATALOG_SERVICE_GET,
+  CATALOG_SERVICE_QUERY,
   CONFIG_SET_GAME_ROOT,
   CONFIG_SET_SOURCE_ROOT,
+  CONFIG_SET_WORKSPACE_ROOT,
+  CAMPAIGN_WORKSPACE_STATUS,
   CONFIG_SHOW,
   CORE_INFO,
   DEPLOYMENT_INSPECT,
@@ -70,6 +90,21 @@ import {
   ContentOperationRequest,
   ContentPathsRequest,
   ContentRevealSourceRequest,
+  ContentDocumentRequest,
+  ContentDocumentMutationRequest,
+  ContentDeckPreviewRequest,
+  ContentDeckWorkspaceRequest,
+  ContentDeckFoldersBootstrapRequest,
+  ContentShopReadRequest,
+  ContentShopMutationRequest,
+  ContentStructureMutationRequest,
+  ContentRegulationReadRequest,
+  ContentRegulationMutationRequest,
+  ContentLocalizationAssetMutationRequest,
+  ContentRuntimePolicyRequest,
+  ContentRuntimePolicyWriteRequest,
+  CatalogServiceGetRequest,
+  CatalogServiceQueryRequest,
   DeleteGateRequest,
   DeleteStructureDeckRequest,
   Gate,
@@ -98,6 +133,7 @@ import {
   deployCampaign,
   catalogSearch,
   catalogStatus,
+  catalogCardIds,
   refreshCatalog,
   getWorkspacePaths,
   inspectDeployment,
@@ -121,13 +157,30 @@ import {
   diffCampaignContent,
   exists,
   inspectCampaignContent,
+  inspectCampaignDeckWorkspace,
+  bootstrapCampaignDeckFolders,
+  listCampaignContentDocuments,
+  mutateCampaignContentDocument,
+  mutateCampaignShopDocuments,
+  mutateCampaignStructureDocument,
+  mutateCampaignRegulationDocuments,
+  inspectCampaignLocalizationAssets,
+  mutateCampaignLocalizationAssetDocument,
+  previewCampaignDeckDocument,
+  readCampaignContentDocument,
+  readCampaignShopDocuments,
+  readCampaignRegulationDocuments,
+  readCampaignRuntimePolicy,
+  mutateCampaignRuntimePolicy,
   resolveCampaignContent,
   validateCampaignContentOperation,
   failure,
   problem,
+  validateCustomCardDatabase,
   writeDocument,
 } from '../core';
 import type { CatalogRefreshRequest, CatalogSearchRequest, CoreOperationResult, CorePathRequest, CorePathsRequest } from '../common/type';
+import { bindCatalogServiceLifecycle, CatalogServiceAdapter } from './catalog-service-adapter';
 import { readJson, saveJson } from './utils';
 
 const handleOpenDirectory = async (
@@ -253,12 +306,17 @@ const generatedIrWriteBlocked = <T = never>(): CoreOperationResult<T> => failure
 
 const allowLegacyIrWrite = (request: { allowLegacyIrWrite?: boolean }): boolean => request.allowLegacyIrWrite === true;
 
-const contentOptions = (app: App, request: ContentPathsRequest = {}) => ({
-  projectRoot: getCoreProjectRoot(app),
-  ...(request.contentRoot ? { contentRoot: request.contentRoot } : {}),
-  ...(request.irRoot ? { irRoot: request.irRoot } : {}),
-  ...(request.registryPath ? { registryPath: request.registryPath } : {}),
-});
+const contentOptions = async (app: App, request: ContentPathsRequest = {}) => {
+  const appRoot = getCoreProjectRoot(app);
+  const config = await readConfig(appRoot);
+  const projectRoot = config.workspaceRoot || appRoot;
+  return {
+    projectRoot,
+    ...(request.contentRoot ? { contentRoot: request.contentRoot } : {}),
+    ...(request.irRoot ? { irRoot: request.irRoot } : {}),
+    ...(request.registryPath ? { registryPath: request.registryPath } : {}),
+  };
+};
 
 const handleReadGates = (app: App) => async (): Promise<ReadGatesResponse> => {
   const projectRoot = getCoreProjectRoot(app);
@@ -421,10 +479,34 @@ const handleConfigShow = async (app: App) => {
   } satisfies CoreOperationResult;
 };
 
-const handleConfigSet = (app: App, field: 'gameRoot' | 'sourceRoot') => async (
+const handleConfigSet = (app: App, field: 'workspaceRoot' | 'gameRoot' | 'sourceRoot') => async (
   _event: IpcMainInvokeEvent,
   request: CorePathRequest,
-) => updateConfig(getCoreProjectRoot(app), { [field]: request.path }).then((config) => result(config));
+) => {
+  // The UI stores only its two user-facing roots. sourceRoot remains a legacy
+  // CLI override and must not shadow the workspace-derived campaign/source.
+  const update = field === 'workspaceRoot' ? { workspaceRoot: request.path } : { [field]: request.path };
+  return updateConfig(getCoreProjectRoot(app), update).then((config) => result(config));
+};
+
+const handleCampaignWorkspaceStatus = async (app: App): Promise<CoreOperationResult> => {
+  const appRoot = getCoreProjectRoot(app);
+  const config = await readConfig(appRoot);
+  const workspaceRoot = config.workspaceRoot;
+  const projectRoot = workspaceRoot || appRoot;
+  const data = {
+    ...(workspaceRoot ? { workspaceRoot } : {}),
+    contentRoot: path.join(projectRoot, 'campaign', 'content'),
+    irRoot: path.join(projectRoot, 'campaign', 'source'),
+    registryPath: path.join(projectRoot, 'campaign', 'id-registry.json'),
+    ...(config.gameRoot ? { gameRoot: config.gameRoot } : {}),
+  };
+  if (!workspaceRoot) return failure([problem('CAMPAIGN_WORKSPACE_REQUIRED', 'Choose a Campaign workspace in Settings before using campaign tools.')], 'PATH_ERROR');
+  if (!(await exists(path.join(data.contentRoot, 'manifest.json')))) {
+    return failure([problem('CAMPAIGN_CONTENT_MISSING', 'The selected Campaign workspace does not contain campaign/content/manifest.json.', data.contentRoot)], 'PATH_ERROR');
+  }
+  return result({ state: 'ready', ...data });
+};
 
 const handleWorkspaceInit = (app: App) => async (
   _event: IpcMainInvokeEvent,
@@ -444,28 +526,28 @@ const handleCampaignValidate = (app: App) => async (
 const handleContentInspect = (app: App) => async (
   _event: IpcMainInvokeEvent,
   request: ContentOperationRequest = {},
-) => inspectCampaignContent(contentOptions(app, request));
+) => inspectCampaignContent(await contentOptions(app, request));
 
 const handleContentResolve = (app: App) => async (
   _event: IpcMainInvokeEvent,
   request: ContentOperationRequest = {},
-) => resolveCampaignContent(contentOptions(app, request));
+) => resolveCampaignContent(await contentOptions(app, request));
 
 const handleContentValidate = (app: App) => async (
   _event: IpcMainInvokeEvent,
   request: ContentOperationRequest = {},
-) => validateCampaignContentOperation(contentOptions(app, request));
+) => validateCampaignContentOperation(await contentOptions(app, request));
 
 const handleContentDiff = (app: App) => async (
   _event: IpcMainInvokeEvent,
   request: ContentOperationRequest = {},
-) => diffCampaignContent(contentOptions(app, request));
+) => diffCampaignContent(await contentOptions(app, request));
 
 const handleContentRevealSource = (app: App) => async (
   _event: IpcMainInvokeEvent,
   request: ContentRevealSourceRequest,
 ) => {
-  const projectRoot = getCoreProjectRoot(app);
+  const { projectRoot } = await contentOptions(app, request);
   const contentRoot = path.resolve(request.contentRoot || path.join(projectRoot, 'campaign', 'content'));
   if (!request.sourcePath || path.isAbsolute(request.sourcePath)) {
     return failure([problem('CONTENT_SOURCE_PATH_INVALID', 'Authored source path must be relative to the content root')], 'PATH_ERROR');
@@ -479,6 +561,59 @@ const handleContentRevealSource = (app: App) => async (
   return result({ path: sourcePath });
 };
 
+const handleContentDocumentList = (app: App) => async (_event: IpcMainInvokeEvent, request: ContentDocumentRequest = {}) =>
+  listCampaignContentDocuments(await contentOptions(app, request));
+
+const handleContentDocumentRead = (app: App) => async (_event: IpcMainInvokeEvent, request: ContentDocumentRequest) =>
+  readCampaignContentDocument({ ...(await contentOptions(app, request)), sourcePath: request.sourcePath || '' });
+
+const handleContentDocumentMutate = (app: App) => async (_event: IpcMainInvokeEvent, request: ContentDocumentMutationRequest) =>
+  mutateCampaignContentDocument(await contentOptions(app, request), request);
+
+const handleContentDeckPreview = (app: App) => async (_event: IpcMainInvokeEvent, request: ContentDeckPreviewRequest) =>
+  previewCampaignDeckDocument(await contentOptions(app, request), request);
+
+const handleContentDeckWorkspaceRead = (app: App) => async (_event: IpcMainInvokeEvent, request: ContentDeckWorkspaceRequest = {}) =>
+  inspectCampaignDeckWorkspace(await contentOptions(app, request));
+
+const handleContentDeckFoldersBootstrap = (app: App) => async (_event: IpcMainInvokeEvent, request: ContentDeckFoldersBootstrapRequest) =>
+  bootstrapCampaignDeckFolders(await contentOptions(app, request), request);
+
+const handleContentShopRead = (app: App) => async (_event: IpcMainInvokeEvent, request: ContentShopReadRequest) =>
+  readCampaignShopDocuments({ ...(await contentOptions(app, request)), sourcePath: request.sourcePath });
+
+const handleContentShopMutate = (app: App) => async (_event: IpcMainInvokeEvent, request: ContentShopMutationRequest) =>
+  mutateCampaignShopDocuments(await contentOptions(app, request), request);
+
+const handleContentStructureMutate = (app: App) => async (_event: IpcMainInvokeEvent, request: ContentStructureMutationRequest) =>
+  mutateCampaignStructureDocument(await contentOptions(app, request), request);
+
+const handleContentRegulationRead = (app: App) => async (_event: IpcMainInvokeEvent, request: ContentRegulationReadRequest) =>
+  readCampaignRegulationDocuments({ ...(await contentOptions(app, request)), sourcePath: request.sourcePath });
+
+const handleContentRegulationMutate = (app: App) => async (_event: IpcMainInvokeEvent, request: ContentRegulationMutationRequest) =>
+  mutateCampaignRegulationDocuments(await contentOptions(app, request), request);
+
+const handleContentLocalizationAssetInspect = (app: App) => async (
+  _event: IpcMainInvokeEvent,
+  request: ContentOperationRequest = {},
+) => inspectCampaignLocalizationAssets(await contentOptions(app, request));
+
+const handleContentLocalizationAssetMutate = (app: App) => async (
+  _event: IpcMainInvokeEvent,
+  request: ContentLocalizationAssetMutationRequest,
+) => mutateCampaignLocalizationAssetDocument(await contentOptions(app, request), request);
+
+const handleContentRuntimePolicyRead = (app: App) => async (
+  _event: IpcMainInvokeEvent,
+  request: ContentRuntimePolicyRequest = {},
+) => readCampaignRuntimePolicy(await contentOptions(app, request));
+
+const handleContentRuntimePolicyWrite = (app: App) => async (
+  _event: IpcMainInvokeEvent,
+  request: ContentRuntimePolicyWriteRequest,
+) => mutateCampaignRuntimePolicy(await contentOptions(app, request), request);
+
 const handleContentCompile = (app: App) => async (
   _event: IpcMainInvokeEvent,
   request: ContentCompileRequest = {},
@@ -488,24 +623,38 @@ const handleContentCompile = (app: App) => async (
       problem('CONTENT_APPLY_CONFIRMATION_REQUIRED', 'Applied content compile requires explicit UI confirmation.'),
     ], 'USAGE_ERROR');
   }
+  if (request.apply === true && (!request.expectedRegistryGeneration || !request.expectedPlannedRegistryGeneration)) {
+    return failure([
+      problem('CONTENT_REGISTRY_REVIEW_REQUIRED', 'Applied content compile requires the exact base and planned registry generations from a compile check.'),
+    ], 'USAGE_ERROR');
+  }
   const { contentRoot, irRoot, registryPath } = request;
   return compileCampaignContentOperation({
-    ...contentOptions(app, { contentRoot, irRoot, registryPath }),
+    ...(await contentOptions(app, { contentRoot, irRoot, registryPath })),
     apply: request.apply === true,
     ...(request.expectedContentGeneration ? { expectedContentGeneration: request.expectedContentGeneration } : {}),
+    ...(request.expectedRegistryGeneration ? { expectedRegistryGeneration: request.expectedRegistryGeneration } : {}),
+    ...(request.expectedPlannedRegistryGeneration ? { expectedPlannedRegistryGeneration: request.expectedPlannedRegistryGeneration } : {}),
   });
 };
 
 const managedDeploy = async (app: App, request: ContentDeployRequest = {}): Promise<CoreOperationResult> => {
-  const projectRoot = getCoreProjectRoot(app);
-  const config = await readConfig(projectRoot);
+  const appRoot = getCoreProjectRoot(app);
+  const config = await readConfig(appRoot);
+  const projectRoot = config.workspaceRoot || appRoot;
   const gameRoot = request.gameRoot || config.gameRoot;
   if (!gameRoot) return failure([problem('GAME_ROOT_REQUIRED', 'Configure a game root before managed campaign deploy')], 'PATH_ERROR');
 
-  const sourceRoot = path.resolve(request.sourceRoot || config.sourceRoot || path.join(projectRoot, 'campaign', 'source'));
+  const sourceRoot = path.resolve(request.sourceRoot || (config.workspaceRoot ? path.join(projectRoot, 'campaign', 'source') : config.sourceRoot || path.join(projectRoot, 'campaign', 'source')));
   const generationPath = path.join(sourceRoot, 'generation.json');
   if (!(await exists(generationPath))) {
-    if (request.allowLegacyIr === true) return deployCampaign({ projectRoot, sourceRoot, gameRoot, logger: coreLogger });
+    if (request.allowLegacyIr === true) return deployCampaign({
+      projectRoot,
+      sourceRoot,
+      gameRoot,
+      logger: coreLogger,
+      acceptSaveCarryover: request.confirmSaveCarryover === true,
+    });
     return failure([
       problem('IR_GENERATION_METADATA_MISSING', 'Managed UI deploy requires compiler generation metadata; legacy deploy must be explicitly enabled.', 'generation.json'),
     ], 'COMMAND_FAILED');
@@ -523,6 +672,7 @@ const managedDeploy = async (app: App, request: ContentDeployRequest = {}): Prom
     gameRoot,
     logger: coreLogger,
     requireGenerationMetadata: true,
+    acceptSaveCarryover: request.confirmSaveCarryover === true,
     expectedGeneration: {
       contentGeneration: snapshot.snapshot.contentGeneration,
       compilerVersion: IR_COMPILER_VERSION,
@@ -547,15 +697,72 @@ const handleCampaignDeploy = (app: App) => async (
 
 const handleRuntimeStatus = (app: App) => async () => runtimeStatus(getCoreProjectRoot(app));
 const handleRuntimeFetch = (app: App) => async () => runtimeFetch(getCoreProjectRoot(app), { logger: coreLogger });
-const handleCatalogStatus = (app: App) => async () => catalogStatus(getCoreProjectRoot(app));
+const catalogProjectRoot = async (app: App): Promise<string> => {
+  const appRoot = getCoreProjectRoot(app);
+  return (await readConfig(appRoot)).workspaceRoot || appRoot;
+};
+
+const legacyCatalogStatus = async (projectRoot: string) => {
+  const status = await catalogStatus(projectRoot);
+  if (!status.ok || !status.data?.valid) return status;
+  try {
+    const resolver = await loadCardResolver(projectRoot);
+    return result({ ...status.data, generation: resolver.catalogGeneration }, status.warnings);
+  } catch (error) {
+    return failure([problem('CARD_CATALOG_INVALID', String(error))], 'COMMAND_FAILED', status.warnings);
+  }
+};
+
+export const createCatalogServiceAdapter = (app: App) => new CatalogServiceAdapter({
+  workspaceRoot: () => catalogProjectRoot(app),
+  legacyStatus: legacyCatalogStatus,
+  legacySearch: (workspaceRoot, request) => catalogSearch(workspaceRoot, request.query, request.limit),
+});
+
+const handleCatalogStatus = (adapter: CatalogServiceAdapter) => async () => adapter.status();
 const handleCatalogRefresh = (app: App) => async (
   _event: IpcMainInvokeEvent,
   request: CatalogRefreshRequest = {},
-) => refreshCatalog(getCoreProjectRoot(app), { online: request.online === true, logger: coreLogger });
-const handleCatalogSearch = (app: App) => async (
+) => {
+  if (request.confirmRefresh !== true || !request.expectedCatalogGeneration) {
+    return failure([problem('CATALOG_REFRESH_REVIEW_REQUIRED', 'Catalog refresh requires the reviewed catalog generation and explicit confirmation')], 'USAGE_ERROR');
+  }
+  if (request.online === true && request.confirmOnline !== true) {
+    return failure([problem('CATALOG_ONLINE_CONFIRMATION_REQUIRED', 'Internet refresh requires explicit confirmation')], 'USAGE_ERROR');
+  }
+  const projectRoot = await catalogProjectRoot(app);
+  const currentStatus = await catalogStatus(projectRoot);
+  let currentGeneration = 'missing';
+  if (currentStatus.ok && currentStatus.data?.valid) {
+    try {
+      currentGeneration = (await loadCardResolver(projectRoot)).catalogGeneration;
+    } catch (error) {
+      return failure([problem('CARD_CATALOG_INVALID', String(error))]);
+    }
+  }
+  if (currentGeneration !== request.expectedCatalogGeneration) {
+    return failure([problem('CATALOG_GENERATION_STALE', `Reviewed catalog generation ${request.expectedCatalogGeneration} does not match current generation ${currentGeneration}`)]);
+  }
+  return refreshCatalog(projectRoot, { online: request.online === true, logger: coreLogger });
+};
+const handleCatalogSearch = (adapter: CatalogServiceAdapter) => async (
   _event: IpcMainInvokeEvent,
   request: CatalogSearchRequest,
-) => catalogSearch(getCoreProjectRoot(app), request.query, request.limit);
+) => adapter.search(request);
+const handleCatalogServiceGet = (adapter: CatalogServiceAdapter) => async (
+  _event: IpcMainInvokeEvent,
+  request: CatalogServiceGetRequest,
+) => adapter.get(request);
+const handleCatalogServiceQuery = (adapter: CatalogServiceAdapter) => async (
+  _event: IpcMainInvokeEvent,
+  request: CatalogServiceQueryRequest,
+) => adapter.query(request);
+const handleCatalogCustomValidate = (app: App) => async () => {
+  const projectRoot = await catalogProjectRoot(app);
+  const ids = await catalogCardIds(projectRoot);
+  if (!ids.ok || !ids.data) return ids;
+  return validateCustomCardDatabase(projectRoot, path.join(projectRoot, 'campaign', 'source'), new Set(ids.data));
+};
 
 const handleDeploymentList = (app: App) => async (
   _event: IpcMainInvokeEvent,
@@ -587,7 +794,8 @@ const handleWithLog: typeof ipcMain.handle = (chanel, handler) => {
 };
 
 /** Injectable handler surface used by the renderer boundary tests. */
-export const createContentIpcHandlers = (app: App) => ({
+export const createContentIpcHandlers = (app: App, catalogAdapter = createCatalogServiceAdapter(app)) => ({
+  [CAMPAIGN_WORKSPACE_STATUS]: () => handleCampaignWorkspaceStatus(app),
   [CONTENT_INSPECT]: handleContentInspect(app),
   [CONTENT_RESOLVE]: handleContentResolve(app),
   [CONTENT_VALIDATE]: handleContentValidate(app),
@@ -595,10 +803,33 @@ export const createContentIpcHandlers = (app: App) => ({
   [CONTENT_DIFF]: handleContentDiff(app),
   [CONTENT_DEPLOY]: handleContentDeploy(app),
   [CONTENT_REVEAL_SOURCE]: handleContentRevealSource(app),
+  [CONTENT_DOCUMENT_LIST]: handleContentDocumentList(app),
+  [CONTENT_DOCUMENT_READ]: handleContentDocumentRead(app),
+  [CONTENT_DOCUMENT_MUTATE]: handleContentDocumentMutate(app),
+  [CONTENT_DECK_PREVIEW]: handleContentDeckPreview(app),
+  [CONTENT_DECK_WORKSPACE_READ]: handleContentDeckWorkspaceRead(app),
+  [CONTENT_DECK_FOLDERS_BOOTSTRAP]: handleContentDeckFoldersBootstrap(app),
+  [CONTENT_SHOP_READ]: handleContentShopRead(app),
+  [CONTENT_SHOP_MUTATE]: handleContentShopMutate(app),
+  [CONTENT_STRUCTURE_MUTATE]: handleContentStructureMutate(app),
+  [CONTENT_REGULATION_READ]: handleContentRegulationRead(app),
+  [CONTENT_REGULATION_MUTATE]: handleContentRegulationMutate(app),
+  [CONTENT_LOCALIZATION_ASSET_INSPECT]: handleContentLocalizationAssetInspect(app),
+  [CONTENT_LOCALIZATION_ASSET_MUTATE]: handleContentLocalizationAssetMutate(app),
+  [CONTENT_RUNTIME_POLICY_READ]: handleContentRuntimePolicyRead(app),
+  [CONTENT_RUNTIME_POLICY_WRITE]: handleContentRuntimePolicyWrite(app),
+  [CATALOG_STATUS]: handleCatalogStatus(catalogAdapter),
+  [CATALOG_REFRESH]: handleCatalogRefresh(app),
+  [CATALOG_SEARCH]: handleCatalogSearch(catalogAdapter),
+  [CATALOG_CUSTOM_VALIDATE]: handleCatalogCustomValidate(app),
+  [CATALOG_SERVICE_GET]: handleCatalogServiceGet(catalogAdapter),
+  [CATALOG_SERVICE_QUERY]: handleCatalogServiceQuery(catalogAdapter),
   [CREATE_DECK]: handleCreateDeck(app),
 });
 
 export const handleIpc = (app: App) => {
+  const catalogAdapter = createCatalogServiceAdapter(app);
+  bindCatalogServiceLifecycle(app, catalogAdapter);
   handleWithLog(OPEN_DIRECTORY, handleOpenDirectory);
   handleWithLog(OPEN_FILE, handleOpenFile);
   handleWithLog(SHOW_MESSAGE_BOX, handleShowMessageBox);
@@ -630,6 +861,8 @@ export const handleIpc = (app: App) => {
   handleWithLog(CONFIG_SHOW, () => handleConfigShow(app));
   handleWithLog(CONFIG_SET_GAME_ROOT, handleConfigSet(app, 'gameRoot'));
   handleWithLog(CONFIG_SET_SOURCE_ROOT, handleConfigSet(app, 'sourceRoot'));
+  handleWithLog(CONFIG_SET_WORKSPACE_ROOT, handleConfigSet(app, 'workspaceRoot'));
+  handleWithLog(CAMPAIGN_WORKSPACE_STATUS, () => handleCampaignWorkspaceStatus(app));
   handleWithLog(WORKSPACE_INIT, handleWorkspaceInit(app));
   handleWithLog(WORKSPACE_INSPECT, handleWorkspaceInspect(app));
   handleWithLog(CAMPAIGN_VALIDATE, handleCampaignValidate(app));
@@ -641,11 +874,29 @@ export const handleIpc = (app: App) => {
   handleWithLog(CONTENT_DIFF, handleContentDiff(app));
   handleWithLog(CONTENT_DEPLOY, handleContentDeploy(app));
   handleWithLog(CONTENT_REVEAL_SOURCE, handleContentRevealSource(app));
+  handleWithLog(CONTENT_DOCUMENT_LIST, handleContentDocumentList(app));
+  handleWithLog(CONTENT_DOCUMENT_READ, handleContentDocumentRead(app));
+  handleWithLog(CONTENT_DOCUMENT_MUTATE, handleContentDocumentMutate(app));
+  handleWithLog(CONTENT_DECK_PREVIEW, handleContentDeckPreview(app));
+  handleWithLog(CONTENT_DECK_WORKSPACE_READ, handleContentDeckWorkspaceRead(app));
+  handleWithLog(CONTENT_DECK_FOLDERS_BOOTSTRAP, handleContentDeckFoldersBootstrap(app));
+  handleWithLog(CONTENT_SHOP_READ, handleContentShopRead(app));
+  handleWithLog(CONTENT_SHOP_MUTATE, handleContentShopMutate(app));
+  handleWithLog(CONTENT_STRUCTURE_MUTATE, handleContentStructureMutate(app));
+  handleWithLog(CONTENT_REGULATION_READ, handleContentRegulationRead(app));
+  handleWithLog(CONTENT_REGULATION_MUTATE, handleContentRegulationMutate(app));
+  handleWithLog(CONTENT_LOCALIZATION_ASSET_INSPECT, handleContentLocalizationAssetInspect(app));
+  handleWithLog(CONTENT_LOCALIZATION_ASSET_MUTATE, handleContentLocalizationAssetMutate(app));
+  handleWithLog(CONTENT_RUNTIME_POLICY_READ, handleContentRuntimePolicyRead(app));
+  handleWithLog(CONTENT_RUNTIME_POLICY_WRITE, handleContentRuntimePolicyWrite(app));
   handleWithLog(RUNTIME_STATUS, handleRuntimeStatus(app));
   handleWithLog(RUNTIME_FETCH, handleRuntimeFetch(app));
-  handleWithLog(CATALOG_STATUS, handleCatalogStatus(app));
+  handleWithLog(CATALOG_STATUS, handleCatalogStatus(catalogAdapter));
   handleWithLog(CATALOG_REFRESH, handleCatalogRefresh(app));
-  handleWithLog(CATALOG_SEARCH, handleCatalogSearch(app));
+  handleWithLog(CATALOG_SEARCH, handleCatalogSearch(catalogAdapter));
+  handleWithLog(CATALOG_CUSTOM_VALIDATE, handleCatalogCustomValidate(app));
+  handleWithLog(CATALOG_SERVICE_GET, handleCatalogServiceGet(catalogAdapter));
+  handleWithLog(CATALOG_SERVICE_QUERY, handleCatalogServiceQuery(catalogAdapter));
   handleWithLog(DEPLOYMENT_LIST, handleDeploymentList(app));
   handleWithLog(DEPLOYMENT_INSPECT, handleDeploymentInspect);
   handleWithLog(DEPLOYMENT_LAUNCH, handleDeploymentLaunch);

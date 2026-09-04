@@ -350,6 +350,8 @@ const createSingleGateData = (
       gate.clear_chapter.gateId,
       gate.clear_chapter.chapterId,
     ),
+    ...(typeof sourceGate?.category === 'number' ? { category: sourceGate.category } : {}),
+    ...(typeof sourceGate?.open_date === 'number' ? { open_date: sourceGate.open_date } : {}),
   };
 
   const chapterField: GateData['chapter'][string] = {};
@@ -438,7 +440,7 @@ const createSingleGateData = (
       // Keep a missing upstream chapter group missing.  The current runtime
       // has gate records which intentionally have no chapter payload yet;
       // manufacturing an empty group would make a round trip alter that
-      // shape and can make overlay deletion semantics ambiguous.
+      // shape and can make generated-data deletion semantics ambiguous.
       chapter: gate.chapters.length ? { [gate.id]: chapterField } : {},
       unlock: unlockField,
       unlock_item: unlockItemField,

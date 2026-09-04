@@ -145,8 +145,8 @@ describe('core contracts', () => {
     assert.equal(missingManifest.ok, false);
     assert.equal(missingManifest.problems[0]?.code, 'MANIFEST_MISSING');
     await initWorkspace(root, sourceRoot);
-    await fs.writeFile(path.join(sourceRoot, 'gate', '90001.json'), JSON.stringify({ id: 90001, parent_id: 90002, chapters: [{ id: 1, parent_id: 2, type: 'Duel', cpu_deck: 'missing.json' }, { id: 2, parent_id: 1, type: 'Unlock', unlock: [{ gateId: 90001, chapterId: 3 }] }] }));
-    await fs.writeFile(path.join(sourceRoot, 'gate', '91000.json'), JSON.stringify({ id: 91000, chapters: [] }));
+    await fs.writeFile(path.join(sourceRoot, 'gate', '100.json'), JSON.stringify({ id: 100, parent_id: 101, chapters: [{ id: 1, parent_id: 2, type: 'Duel', cpu_deck: 'missing.json' }, { id: 2, parent_id: 1, type: 'Unlock', unlock: [{ gateId: 100, chapterId: 3 }] }] }));
+    await fs.writeFile(path.join(sourceRoot, 'gate', '2102.json'), JSON.stringify({ id: 2102, chapters: [] }));
     await fs.writeFile(path.join(sourceRoot, 'structure', '1129001.json'), JSON.stringify({ id: 1129001, deck: 'missing-structure.json' }));
     const invalid = await validateCampaign(root, sourceRoot);
     assert.equal(invalid.ok, false);
@@ -158,23 +158,19 @@ describe('core contracts', () => {
     assert.equal(codes.has('STRUCTURE_DECK_MISSING') || codes.has('DECK_REFERENCE_MISSING'), true);
   });
 
-  it('validates source and deploys an additive fake-runtime overlay with cache fallback', async () => {
+  it('validates source and deploys authoritative campaign Data with cache fallback', async () => {
     const root = await makeRoot();
     const sourceRoot = path.join(root, 'source');
     const gameRoot = path.join(root, 'game');
     await initWorkspace(root, sourceRoot);
-    await fs.writeFile(path.join(sourceRoot, 'manifest.json'), JSON.stringify({ formatVersion: 1, campaign: { name: 'Fixture', slug: 'fixture', version: 'test/1' }, directories: { gate: 'gate', deck: 'deck', structure: 'structure' }, authoring: { language: 'Korean' }, idPolicy: { gatePrefix: 90000, structurePrefix: 1129000 }, runtime: { repository: 'pixeltris/YgoMaster', channel: 'latest', autoDownload: true } }));
+    await fs.writeFile(path.join(sourceRoot, 'manifest.json'), JSON.stringify({ formatVersion: 1, campaign: { name: 'Fixture', slug: 'fixture', version: 'test/1' }, directories: { gate: 'gate', deck: 'deck', structure: 'structure' }, authoring: { language: 'Korean' }, idPolicy: { gatePrefix: 100, structurePrefix: 1129000 }, runtime: { repository: 'pixeltris/YgoMaster', channel: 'latest', autoDownload: true } }));
     await fs.writeFile(path.join(sourceRoot, 'deck', 'cpu.json'), JSON.stringify({ name: 'cpu', m: { ids: [10001], r: [1] }, e: { ids: [], r: [] }, s: { ids: [], r: [] } }));
-    await fs.writeFile(path.join(sourceRoot, 'gate', '90001.json'), JSON.stringify({ id: 90001, parent_id: 0, name: 'Fixture Gate', description: 'Test', priority: 1, illust_id: 4027, clear_chapter: { gateId: 90001, chapterId: 1 }, chapters: [{ id: 1, parent_id: 0, type: 'Duel', description: 'Duel', cpu_deck: 'cpu.json', cpu_name: 'CPU', unlock_secret: '10001', unlock_pack: [10001], secretType: 4, unlockSecrets: [10001] }] }));
-    await fs.mkdir(path.join(sourceRoot, 'overlay', 'ClientData'), { recursive: true });
-    await fs.mkdir(path.join(sourceRoot, 'overlay', 'ClientData', 'SoloGateBackgrounds'), { recursive: true });
+    await fs.writeFile(path.join(sourceRoot, 'gate', '100.json'), JSON.stringify({ id: 100, parent_id: 0, name: 'Fixture Gate', description: 'Test', priority: 1, illust_id: 4027, clear_chapter: { gateId: 100, chapterId: 1 }, chapters: [{ id: 1, parent_id: 0, type: 'Duel', description: 'Duel', cpu_deck: 'cpu.json', cpu_name: 'CPU', unlock_secret: '10001', unlock_pack: [10001], secretType: 4, unlockSecrets: [10001] }] }));
+    await fs.mkdir(path.join(sourceRoot, 'target', 'ygomaster', 'Data', 'ClientData', 'SoloGateBackgrounds'), { recursive: true });
     await Promise.all([
-      fs.writeFile(path.join(sourceRoot, 'overlay', 'ClientData', 'Shop.json'), '{}'),
-      fs.writeFile(path.join(sourceRoot, 'overlay', 'ClientData', 'ShopPackOdds.json'), '{}'),
-      fs.writeFile(path.join(sourceRoot, 'overlay', 'ClientData', 'ShopPackOddsVisuals.json'), '{}'),
-      fs.writeFile(path.join(sourceRoot, 'overlay', 'ClientData', 'Settings.json'), '{}'),
-      fs.writeFile(path.join(sourceRoot, 'overlay', 'ClientData', 'RegulationMaster.json'), '{}'),
-      fs.writeFile(path.join(sourceRoot, 'overlay', 'ClientData', 'SoloGateBackgrounds', '90001.png'), Uint8Array.from([
+      fs.writeFile(path.join(sourceRoot, 'target', 'ygomaster', 'Data', 'Shop.json'), JSON.stringify({ PackShop: {} })),
+      fs.writeFile(path.join(sourceRoot, 'target', 'ygomaster', 'Data', 'ShopPackOdds.json'), JSON.stringify({ entries: [] })),
+      fs.writeFile(path.join(sourceRoot, 'target', 'ygomaster', 'Data', 'ClientData', 'SoloGateBackgrounds', '100.png'), Uint8Array.from([
         0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
         0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
         0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00,
@@ -188,32 +184,41 @@ describe('core contracts', () => {
     await fs.writeFile(path.join(cacheRuntime, 'YgoMaster.exe'), '');
     await fs.writeFile(path.join(cacheRuntime, 'YgoMasterClient.exe'), '');
     await fs.writeFile(path.join(cacheRuntime, 'YgoMasterLoader.dll'), '');
-    await fs.writeFile(path.join(cacheRuntime, 'Data', 'Solo.json'), JSON.stringify({ Master: { Solo: { gate: {}, chapter: {}, unlock: {}, unlock_item: {}, reward: {} } }, keep: true }));
+    await fs.writeFile(path.join(cacheRuntime, 'Data', 'Solo.json'), JSON.stringify({ Master: { Solo: { gate: { '1': {} }, chapter: {}, unlock: {}, unlock_item: {}, reward: {} } }, keep: true }));
+    await fs.writeFile(path.join(cacheRuntime, 'Data', 'Shop.json'), JSON.stringify({ keep: true, PackShop: { '1': {} }, StructureShop: { '2': {} } }));
+    await fs.writeFile(path.join(cacheRuntime, 'Data', 'ShopPackOdds.json'), JSON.stringify([{ name: 'baseline' }]));
+    await fs.mkdir(path.join(cacheRuntime, 'Data', 'SoloDuels'), { recursive: true });
+    await fs.mkdir(path.join(cacheRuntime, 'Data', 'StructureDecks'), { recursive: true });
+    await fs.writeFile(path.join(cacheRuntime, 'Data', 'SoloDuels', '1.json'), '{}');
+    await fs.writeFile(path.join(cacheRuntime, 'Data', 'StructureDecks', '1120001.json'), '{}');
 
     const validation = await validateCampaign(root, sourceRoot);
     assert.equal(validation.ok, true);
     const deployed = await deployCampaign({ projectRoot: root, sourceRoot, gameRoot, transport: { getJson: async () => { throw new Error('offline'); }, getBytes: async () => new Uint8Array() } });
     assert.equal(deployed.ok, true);
     assert.equal(deployed.warnings.some((entry) => entry.code === 'LATEST_RELEASE_LOOKUP_FAILED'), true);
-    assert.equal(deployed.warnings.some((entry) => entry.code === 'UNLOCK_SECRET_UNSUPPORTED'), true);
     assert.equal(deployed.warnings.some((entry) => entry.code === 'UNSUPPORTED_PACK_FIELD'), true);
     const deploymentPath = deployed.data?.path as string;
     assert.ok(deploymentPath);
     const solo = JSON.parse(await readFile(path.join(deploymentPath, 'Data', 'Solo.json'), 'utf8')) as { Master: { Solo: { gate: Record<string, unknown> } }; keep: boolean };
     assert.equal(solo.keep, true);
-    assert.equal(solo.Master.Solo.gate['90001'] !== undefined, true);
-    const chapter = (solo.Master.Solo as unknown as { chapter: Record<string, Record<string, Record<string, unknown>>> }).chapter['90001']['900010001'];
-    assert.equal(chapter.unlock_secret, undefined);
+    assert.equal(solo.Master.Solo.gate['1'], undefined);
+    assert.equal(solo.Master.Solo.gate['100'] !== undefined, true);
+    const chapter = (solo.Master.Solo as unknown as { chapter: Record<string, Record<string, Record<string, unknown>>> }).chapter['100']['1000001'];
+    assert.equal(chapter.unlock_secret, '10001');
     assert.equal(chapter.unlock_pack, undefined);
     assert.equal(chapter.secretType, undefined);
     assert.equal(chapter.unlockSecrets, undefined);
-    const sourceGate = JSON.parse(await readFile(path.join(sourceRoot, 'gate', '90001.json'), 'utf8')) as { chapters: Array<Record<string, unknown>> };
+    const sourceGate = JSON.parse(await readFile(path.join(sourceRoot, 'gate', '100.json'), 'utf8')) as { chapters: Array<Record<string, unknown>> };
     assert.equal(sourceGate.chapters[0].unlock_secret, '10001');
     assert.deepEqual(sourceGate.chapters[0].unlock_pack, [10001]);
-    for (const file of ['Shop.json', 'ShopPackOdds.json', 'ShopPackOddsVisuals.json', 'Settings.json', 'RegulationMaster.json']) {
-      assert.equal(await fs.stat(path.join(deploymentPath, 'Data', 'ClientData', file)).then(() => true, () => false), false);
-    }
-    assert.equal(await fs.stat(path.join(deploymentPath, 'Data', 'SoloDuels', '900010001.json')).then(() => true), true);
+    const deployedShop = JSON.parse(await readFile(path.join(deploymentPath, 'Data', 'Shop.json'), 'utf8')) as { keep: boolean; PackShop: object; StructureShop: object };
+    assert.equal(deployedShop.keep, true);
+    assert.deepEqual(deployedShop.PackShop, {});
+    assert.deepEqual(deployedShop.StructureShop, {});
+    assert.equal(await fs.stat(path.join(deploymentPath, 'Data', 'SoloDuels', '1.json')).then(() => true, () => false), false);
+    assert.equal(await fs.stat(path.join(deploymentPath, 'Data', 'StructureDecks', '1120001.json')).then(() => true, () => false), false);
+    assert.equal(await fs.stat(path.join(deploymentPath, 'Data', 'SoloDuels', '1000001.json')).then(() => true), true);
     assert.equal(await fs.stat(path.join(deploymentPath, '.campaign-deployment.json')).then(() => true), true);
   });
 });

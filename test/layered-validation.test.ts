@@ -76,7 +76,7 @@ describe('layered validation policy', () => {
       code: 'IR_GATE_INVALID',
       message: 'Generated wording is intentionally unstable',
       severity: 'warning' as const,
-      path: 'gate/90000.json',
+      path: 'gate/100.json',
       line: 1,
       column: 1,
       endLine: 1,
@@ -96,7 +96,7 @@ describe('layered validation policy', () => {
       irRoot: 'fixture-ir',
       checkOnly: true,
       compileCheck: () => ({ ok: true, checkOnly: true, problems: [], warnings: [generated], stagingRoot: 'fixture-staging' }),
-      sourceMap: { 'gate/90000.json': location },
+      sourceMap: { 'gate/100.json': location },
       validateIr: async (_projectRoot, irRoot, context) => {
         irCalled = irRoot === 'fixture-staging' && context.checkOnly;
         return { ok: true, exitCode: 0, exitName: 'SUCCESS', problems: [], warnings: [] };
@@ -170,13 +170,16 @@ describe('existing validator reuse and performance report', () => {
       `${JSON.stringify({
         formatVersion: 1,
         campaign: { name: 'Fixture', slug: 'fixture', version: '0.0.1' },
-        directories: { gate: 'gate', deck: 'deck', structure: 'structure' },
+        directories: { gate: 'gate', deck: 'deck', structure: 'structure', target: 'target/ygomaster' },
         authoring: { language: 'English' },
-        idPolicy: { gatePrefix: 90000, structurePrefix: 1129000 },
+        idPolicy: { gatePrefix: 100, structurePrefix: 1129000 },
         runtime: { repository: 'pixeltris/YgoMaster', channel: 'latest', autoDownload: true },
       }, null, 2)}\n`,
       'utf8',
     );
+    await fs.mkdir(path.join(irRoot, 'target', 'ygomaster', 'Data'), { recursive: true });
+    await fs.writeFile(path.join(irRoot, 'target', 'ygomaster', 'Data', 'Shop.json'), '{"PackShop":{}}\n', 'utf8');
+    await fs.writeFile(path.join(irRoot, 'target', 'ygomaster', 'Data', 'ShopPackOdds.json'), '{"entries":[]}\n', 'utf8');
 
     let checkOnlySeen = false;
     const result = await validateLayeredCampaign({

@@ -138,7 +138,7 @@ try {
   const metadata = JSON.parse(await fs.readFile(path.join(deploymentPath, '.campaign-deployment.json'), 'utf8'));
   const soloDocument = JSON.parse(await fs.readFile(path.join(deploymentPath, 'Data', 'Solo.json'), 'utf8'));
   const master = findMaster(soloDocument);
-  if (!master?.Solo?.gate?.['90001']) throw new Error('Release overlay gate missing');
+  if (!master?.Solo?.gate?.['100']) throw new Error('Release campaign gate missing');
   if (metadata.resolvedRuntimeTag !== fetched.data.entry.tag) throw new Error('Deployment metadata runtime tag mismatch');
   const cacheRoot = path.join(extractedRoot, '.cache', 'ygomaster', 'releases');
   await fs.access(path.join(cacheRoot, metadata.resolvedRuntimeTag, 'metadata.json'));

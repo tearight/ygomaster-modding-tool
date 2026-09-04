@@ -1,4 +1,5 @@
-import { CardNameResolver, CardResolution, CardResolutionLock } from './card-resolver';
+import { CardNameResolver, CardResolution, CardResolutionLock, parseCardReferenceText } from './card-resolver';
+import type { CardReferenceSelector } from './card-resolver';
 import {
   ContentFormatError,
   ParsedContentEnvelope,
@@ -15,7 +16,7 @@ import type { IdRegistry } from './id-registry';
 import { validateRegistry } from './id-registry';
 import type { JsonObject, JsonValue, Problem } from './types';
 
-/** The authored Shop source is intentionally separate from the target overlay. */
+/** The authored Shop source is intentionally separate from generated target Data. */
 export const SHOP_CONTENT_FORMAT_VERSION = 1 as const;
 export const SHOP_PACK_METADATA_KIND = 'shop-pack' as const;
 export const SHOP_ODDS_KIND = 'shop-odds' as const;
@@ -23,9 +24,9 @@ export const SHOP_CAPABILITY_KIND = 'shop-capability' as const;
 /**
  * The Shop projection is deliberately versioned independently from the
  * workspace's v1 target matrix.  Collection integration can opt into this
- * narrow, fixture-backed subset without making arbitrary Shop overlays legal.
+ * narrow, fixture-backed subset without making arbitrary Shop target files legal.
  */
-export const SHOP_TARGET_CONTRACT_VERSION = 'ygomaster-campaign-target/v2' as const;
+export const SHOP_TARGET_CONTRACT_VERSION = 'ygomaster-campaign-target/v3' as const;
 export const SHOP_TARGET_SUPPORTED_SUBSET = 'official-example-pack' as const;
 
 export const SHOP_CONTENT_CODES = Object.freeze({
@@ -85,6 +86,7 @@ export const SHOP_CONTENT_CODES = Object.freeze({
   ODDS_NAME_INVALID: 'SHOP_ODDS_NAME_INVALID',
   PACKLIST_WEIGHT_TARGET_IGNORED: 'SHOP_PACKLIST_WEIGHT_TARGET_IGNORED',
   PACKLIST_VARIANT_TARGET_IGNORED: 'SHOP_PACKLIST_VARIANT_TARGET_IGNORED',
+  FIELD_UNSUPPORTED: 'SHOP_FIELD_UNSUPPORTED',
   TARGET_UNSUPPORTED: 'SHOP_TARGET_UNSUPPORTED',
 } as const);
 
@@ -127,6 +129,7 @@ export interface PackListEntry {
   cardName: string;
   normalizedCardName?: string;
   runtimeId?: number;
+  selector?: CardReferenceSelector;
   weight?: number;
   variant?: string;
   line: number;
@@ -601,13 +604,15 @@ const parsePackEntry = (entry: SectionedEntry, index: number): { value?: PackLis
     }
     break;
   }
-  const cardName = tokens.join(' ').trim();
+  const reference = parseCardReferenceText(tokens.join(' ').trim());
+  const cardName = reference.name;
   if (!cardName) problems.push(entryDiagnostic(SHOP_CONTENT_CODES.PACKLIST_CARD_MISSING, 'Packlist entry requires a card name', entry, `/entries/${index}/cardName`));
   if (problems.length) return { problems };
   return {
     value: {
       rarity: rarity.value,
       cardName,
+      ...(reference.selector ? { selector: reference.selector } : {}),
       ...(weight !== undefined ? { weight } : {}),
       ...(variant !== undefined ? { variant } : {}),
       line: entry.line,
@@ -951,6 +956,7 @@ const validateCardMembership = (
       sourcePath: entry.sourcePath,
       sourceSpan: entry.sourceSpan,
       jsonPointer: `/entries/${entry.line}/cardName`,
+      ...(entry.selector ? { selector: entry.selector } : {}),
     });
     resolutions.push(resolution);
     problems.push(...resolution.problems);
@@ -985,6 +991,7 @@ const validateCardMembership = (
       sourcePath: entry.sourcePath,
       sourceSpan: entry.sourceSpan,
       jsonPointer: `/entries/${entry.line}/cardName`,
+      ...(entry.selector ? { selector: entry.selector } : {}),
     })));
     resolutionLock = batch.lock;
   }
@@ -1178,6 +1185,47 @@ const targetUnlockProblems = (metadata: ParsedShopPackMetadata | undefined): Pro
   )];
 };
 
+const supportedMetadataFields = new Set([
+  'shopId', 'name', 'price', 'availability', 'packlist', 'pool', 'odds', 'oddsRef',
+  'oddsName', 'oddsProfile', 'unlock', 'unlockRef', 'packSize', 'cardsPerPack',
+  'imageKey', 'packImage', 'iconData', 'cover', 'coverCard', 'localization', 'provenance',
+]);
+const supportedOddsFields = new Set(['slots', 'collation']);
+
+/** Unknown JSON remains byte-preserved in authored source, but cannot be
+ * silently omitted from the approved PackShop target projection. */
+const targetFieldProblems = (
+  metadata: ParsedShopPackMetadata | undefined,
+  odds: ParsedShopOdds | undefined,
+): Problem[] => {
+  const problems: Problem[] = [];
+  const metadataPayload = metadata?.envelope.raw.payload;
+  if (isRecord(metadataPayload)) {
+    for (const key of Object.keys(metadataPayload).sort(compareOrdinal)) {
+      if (!supportedMetadataFields.has(key)) problems.push(diagnostic(
+        SHOP_CONTENT_CODES.FIELD_UNSUPPORTED,
+        `Shop pack field is outside the approved target allowlist: ${key}`,
+        metadata?.sourcePath,
+        undefined,
+        `/payload/${key}`,
+      ));
+    }
+  }
+  const oddsPayload = odds?.envelope.raw.payload;
+  if (isRecord(oddsPayload)) {
+    for (const key of Object.keys(oddsPayload).sort(compareOrdinal)) {
+      if (!supportedOddsFields.has(key)) problems.push(diagnostic(
+        SHOP_CONTENT_CODES.FIELD_UNSUPPORTED,
+        `Shop odds field is outside the approved target allowlist: ${key}`,
+        odds?.sourcePath,
+        undefined,
+        `/payload/${key}`,
+      ));
+    }
+  }
+  return problems;
+};
+
 const deterministicOddsName = (metadata: ShopPackMetadata): string => {
   const key = metadata.normalizedShopId.replace(/^shop:/u, '');
   const safeKey = key.replace(/[^A-Za-z0-9_-]/gu, '-');
@@ -1265,7 +1313,7 @@ const makePackTargetEntry = (
 
 /**
  * Compile the explicitly approved official-example Shop subset.  The result
- * is a pure projection; collection/deployment owns overlay merge and writes.
+ * is a pure projection; collection/deployment owns authoritative materialization.
  */
 export const compileShopContent = (
   input: ShopContentSources,
@@ -1274,6 +1322,7 @@ export const compileShopContent = (
   const normalizedOptions = compileOptions(input, options);
   const validation = validateShopContent(input, normalizedOptions);
   const targetProblems = [
+    ...targetFieldProblems(validation.metadata, validation.odds),
     ...targetRarityProblems(validation.packList, validation.odds),
     ...targetPackSizeProblems(validation.metadata, validation.odds),
     ...targetUnlockProblems(validation.metadata),

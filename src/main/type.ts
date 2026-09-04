@@ -117,6 +117,9 @@ export interface GateData {
       view_gate: number;
       unlock_id: number;
       clear_chapter: number;
+      /** Runtime display fields preserved from YgoMaster Solo.json. */
+      category?: number;
+      open_date?: number;
     };
   };
   chapter: {

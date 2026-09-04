@@ -24,13 +24,13 @@ const fixtureRoot = path.resolve(__dirname, '../../../campaign/fixtures/deck-con
 const readFixture = async (relativePath: string): Promise<string> =>
   readFile(path.join(fixtureRoot, relativePath), 'utf8');
 
-const makeCard = (id: number, english: string): CatalogCard => ({
+const makeCard = (id: number, english: string, type?: number): CatalogCard => ({
   id,
   ydkId: id + 800000,
   names: { english, display: english },
   texts: {},
   original: {},
-  stats: {},
+  stats: { ...(type === undefined ? {} : { type }) },
   autoTags: [],
 });
 
@@ -42,10 +42,11 @@ const cards: CatalogCard[] = [
   makeCard(1005, '1000-Eyes Restrict'),
   makeCard(1006, 'Firewall Dragon'),
   ...Array.from({ length: 9 }, (_, index) => makeCard(1007 + index, `Main Card ${String(index + 7).padStart(2, '0')}`)),
-  makeCard(1016, 'Extra Card Alpha'),
-  makeCard(1017, 'Extra Card Beta'),
+  makeCard(1016, 'Extra Card Alpha', 0x41),
+  makeCard(1017, 'Extra Card Beta', 0x41),
   makeCard(1018, 'Side Card'),
   makeCard(1020, 'Normal Extra Card'),
+  makeCard(1021, 'Ritual Main Card', 0x81),
 ];
 
 const resolver = createCardResolver(cards, {
@@ -199,6 +200,21 @@ describe('DCK-001 line-based decklists', () => {
     assert.ok(unavailable.problems.some((problem) => problem.code === DECK_CODES.CARD_RUNTIME_UNAVAILABLE));
   });
 
+  it('preserves reviewed runtime selectors from decklist text through the resolution lock', async () => {
+    const source = (await readFixture('success/deck.decklist'))
+      .replace(/Blue-Eyes White Dragon/gu, 'Blue-Eyes White Dragon @runtime=1001 @provenance=official-ocg-db:4007 @variant=official-art')
+      .replace(/BLUE—EYES WHITE DRAGON/gu, 'BLUE—EYES WHITE DRAGON @runtime=1001 @provenance=official-ocg-db:4007 @variant=official-art');
+    const selectedResolver = createCardResolver([...cards, makeCard(1022, 'Blue Eyes White Dragon')], {
+      aliases: [{ name: 'Chronicle Dragon', runtimeId: 1004, reviewed: true, source: 'fixture' }],
+    });
+    const document = parseDecklist(source, { sourcePath: 'fixture://deck-content/selected.decklist', metadata });
+    const result = compileDecklist(document, selectedResolver, { extraDeckCardIds: eligibleExtraDeckCardIds });
+    assert.equal(result.ok, true, JSON.stringify(result.problems));
+    assert.equal(document.entries[0]?.selector?.runtimeId, 1001);
+    assert.equal(result.lock?.entries.filter((entry) => entry.selector?.runtimeId === 1001).length, 2);
+    assert.equal(result.ir?.m.ids.filter((id) => id === 1001).length, 3);
+  });
+
   it('applies explicit rarity and optional regulation without silently compiling failures', async () => {
     const rejected = await compileFixture('success/deck.decklist', {
       defaultRarity: 2,
@@ -245,6 +261,29 @@ describe('DCK-001 line-based decklists', () => {
     );
     assert.equal(emptyExtra.ok, true);
     assert.ok(emptyExtra.ir);
+  });
+
+  it('uses catalog type bits to reject Fusion in Main while retaining Ritual in Main', async () => {
+    const success = await readFixture('success/deck.decklist');
+    const catalogPolicy = (runtimeId: number) => resolver.isExtraDeckCard(runtimeId);
+    const fusionInMain = compileDecklist(
+      parseDecklist(success.replace('3 Main Card 07', '3 Extra Card Alpha'), { sourcePath: 'fixture://deck-content/fusion-main.decklist', metadata }),
+      resolver,
+      { isExtraDeckCard: catalogPolicy },
+    );
+    assert.equal(fusionInMain.ok, false);
+    assert.equal(fusionInMain.ir, undefined);
+    assert.equal(fusionInMain.problems.some((problem) => problem.code === DECK_CODES.MAIN_CARD_INVALID), true);
+
+    const ritualInMain = compileDecklist(
+      parseDecklist(success.replace('3 Main Card 07', '3 Ritual Main Card'), { sourcePath: 'fixture://deck-content/ritual-main.decklist', metadata }),
+      resolver,
+      { isExtraDeckCard: catalogPolicy },
+    );
+    assert.equal(ritualInMain.ok, true, JSON.stringify(ritualInMain.problems));
+    assert.equal(ritualInMain.ir?.m.ids.includes(1021), true);
+    assert.equal(resolver.isExtraDeckCard(1016), true);
+    assert.equal(resolver.isExtraDeckCard(1021), false);
   });
 
   it('rejects malformed IR and parses every JSON fixture strictly', async () => {

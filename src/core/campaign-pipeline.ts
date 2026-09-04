@@ -25,14 +25,21 @@ export const compilerBundleFromContent = (discovered: DiscoveredCampaignIrBundle
   const targetRoot = `${discovered.manifest.directories?.target || 'target/ygomaster'}/`;
   return {
     decks: Object.values(discovered.decks).map((entry) => ({
-      // Authored references name the deterministic JSON projection while the
-      // actual authored bytes remain in the adjacent .decklist file.
-      key: entry.source.sourcePath.replace(/\.decklist$/iu, '.json'),
+      key: entry.adapterPath,
+      reference: entry.reference,
+      aliases: entry.aliases,
       source: entry.source.value,
       sourcePath: entry.source.sourcePath,
+      ...(entry.sidecar ? { sidecarPath: entry.sidecar.sourcePath } : {}),
       ...(entry.metadata ? { metadata: entry.metadata } : {}),
       ...(entry.regulation ? { regulation: entry.regulation } : {}),
     })),
+    ...(discovered.deckFolderSource ? {
+      deckFolders: {
+        value: discovered.deckFolderSource.value,
+        sourcePath: discovered.deckFolderSource.sourcePath,
+      },
+    } : {}),
     gates: discovered.gates.map((entry) => ({ value: entry.value, sourcePath: entry.sourcePath })),
     structures: discovered.structures.map((entry) => ({ value: entry.value, sourcePath: entry.sourcePath })),
     shops: discovered.shops.map((entry) => ({
@@ -43,6 +50,7 @@ export const compilerBundleFromContent = (discovered: DiscoveredCampaignIrBundle
       packListSourcePath: entry.packList.sourcePath,
       oddsSourcePath: entry.odds.sourcePath,
     })),
+    releaseGraphs: discovered.releaseGraphs.map((entry) => ({ value: entry.value, sourcePath: entry.sourcePath })),
     regulations: Object.values(discovered.regulations).map((entry) => ({
       key: entry.key,
       metadata: entry.metadata.value,
@@ -50,6 +58,7 @@ export const compilerBundleFromContent = (discovered: DiscoveredCampaignIrBundle
       metadataSourcePath: entry.metadata.sourcePath,
       rulesSourcePath: entry.rules.sourcePath,
     })),
+    ...(discovered.runtimePolicy ? { runtimePolicy: discovered.runtimePolicy } : {}),
     ...(discovered.localization ? { localization: discovered.localization } : {}),
     ...(typeof authoring?.language === 'string' ? { language: authoring.language } : {}),
     ...(typeof authoring?.fallbackLanguage === 'string' ? { fallbackLanguage: authoring.fallbackLanguage } : {}),

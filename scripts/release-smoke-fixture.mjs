@@ -7,8 +7,12 @@ export const createSmokeGateFixture = async (sourceRoot) => {
   await fs.mkdir(path.join(sourceRoot, 'deck'), { recursive: true });
   await fs.mkdir(path.join(sourceRoot, 'gate'), { recursive: true });
   await fs.writeFile(path.join(sourceRoot, 'deck', 'cpu.json'), JSON.stringify({ m: { ids: [10001], r: [1] }, e: { ids: [], r: [] }, s: { ids: [], r: [] } }));
-  await fs.writeFile(path.join(sourceRoot, 'gate', '90001.json'), JSON.stringify({ id: 90001, name: 'Release smoke', description: 'Release smoke', priority: 1, clear_chapter: { gateId: 90001, chapterId: 1 }, chapters: [{ id: 1, type: 'Duel', cpu_deck: 'cpu.json', cpu_name: 'CPU' }] }));
-  const gateBackground = path.join(sourceRoot, 'overlay', 'ClientData', 'SoloGateBackgrounds', '90001.png');
+  await fs.writeFile(path.join(sourceRoot, 'gate', '100.json'), JSON.stringify({ id: 100, name: 'Release smoke', description: 'Release smoke', priority: 1, clear_chapter: { gateId: 100, chapterId: 1 }, chapters: [{ id: 1, type: 'Duel', cpu_deck: 'cpu.json', cpu_name: 'CPU' }] }));
+  const targetData = path.join(sourceRoot, 'target', 'ygomaster', 'Data');
+  await fs.mkdir(targetData, { recursive: true });
+  await fs.writeFile(path.join(targetData, 'Shop.json'), JSON.stringify({ PackShop: {} }));
+  await fs.writeFile(path.join(targetData, 'ShopPackOdds.json'), JSON.stringify({ entries: [] }));
+  const gateBackground = path.join(targetData, 'ClientData', 'SoloGateBackgrounds', '100.png');
   await fs.mkdir(path.dirname(gateBackground), { recursive: true });
   const smokePng = Buffer.from(smokePngBase64, 'base64');
   smokePng.writeUInt32BE(256, 16);
@@ -22,7 +26,7 @@ export const preflightSmokeFixture = async (temporaryRoot) => {
   const { gateBackground } = await createSmokeGateFixture(sourceRoot);
   const png = await fs.readFile(gateBackground);
   if (png.readUInt32BE(16) !== 256 || png.readUInt32BE(20) !== 256) throw new Error('Release smoke Gate background must be 256x256');
-  const gate = JSON.parse(await fs.readFile(path.join(sourceRoot, 'gate', '90001.json'), 'utf8'));
+  const gate = JSON.parse(await fs.readFile(path.join(sourceRoot, 'gate', '100.json'), 'utf8'));
   if (!gate.chapters?.length || !gate.clear_chapter) throw new Error('Release smoke Gate fixture is incomplete');
   return sourceRoot;
 };

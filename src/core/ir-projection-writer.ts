@@ -28,7 +28,7 @@ export const IR_PROJECTION_WRITER_CODES = Object.freeze({
   DECK_INVALID: 'IR_PROJECTION_DECK_INVALID',
   GATE_INVALID: 'IR_PROJECTION_GATE_INVALID',
   STRUCTURE_INVALID: 'IR_PROJECTION_STRUCTURE_INVALID',
-  OVERLAY_INVALID: 'IR_PROJECTION_OVERLAY_INVALID',
+  TARGET_INVALID: 'IR_PROJECTION_TARGET_INVALID',
   PRESERVED_SOURCE_INVALID: 'IR_PROJECTION_PRESERVED_SOURCE_INVALID',
   PRESERVED_READ_FAILED: 'IR_PROJECTION_PRESERVED_READ_FAILED',
 } as const);
@@ -43,11 +43,13 @@ export interface IrProjectionWriterInput {
   decks: Record<string, DeckIR>;
   gates: readonly GateCompileIR[];
   structures: readonly StructureProjection[];
+  /** Validated campaign analysis graphs; never deployed into YgoMaster Data. */
+  graphs?: Record<string, JsonObject>;
   /** Structure projection path or numeric structure id to legacy deck reference. */
   structureDecks?: Record<string, string>;
   structureMetadata?: Record<string, { name?: string; description?: string }>;
-  /** Relative overlay/localization files. JSON objects are serialized deterministically. */
-  overlay?: Record<string, IrProjectionFile>;
+  /** Relative YgoMaster Data target files. JSON objects are serialized deterministically. */
+  target?: Record<string, IrProjectionFile>;
   /** Compatibility spelling for callers that keep localization projections separate. */
   localization?: Record<string, IrProjectionFile>;
   generation: IRGenerationMetadata;
@@ -136,12 +138,12 @@ const fileBytes = (value: IrProjectionFile, relative: string): Uint8Array => {
   if (isBytes(value)) return new Uint8Array(value);
   if (typeof value === 'string') return Buffer.from(value, 'utf8');
   if (isRecord(value)) return jsonBytes(value);
-  throw new Error(`Overlay file must be text, bytes, or a JSON object: ${relative}`);
+  throw new Error(`Target file must be text, bytes, or a JSON object: ${relative}`);
 };
 
 const normalizedOutputRelative = (
   raw: unknown,
-  family: 'gate' | 'deck' | 'structure' | 'overlay',
+  family: 'gate' | 'deck' | 'structure' | 'target',
 ): string | undefined => {
   if (typeof raw !== 'string') return undefined;
   const normalized = raw.replace(/\\/gu, '/');
@@ -149,9 +151,9 @@ const normalizedOutputRelative = (
     const basename = path.posix.basename(normalized);
     return basename ? `structure/${basename}` : undefined;
   }
-  if (family === 'overlay') {
-    const relative = normalized.startsWith('Data/') ? normalized.slice('Data/'.length) : normalized;
-    if (!relative.startsWith('overlay/')) return `overlay/${relative}`;
+  if (family === 'target') {
+    const relative = normalized.startsWith('Data/') ? normalized : `Data/${normalized}`;
+    if (!relative.startsWith('target/ygomaster/')) return `target/ygomaster/${relative}`;
   }
   return normalized;
 };
@@ -336,17 +338,26 @@ export const writeIrProjection = async (
     }), `structure:${structure.path}`);
   }
 
-  const overlayFiles = { ...(input.localization || {}), ...(input.overlay || {}) };
-  for (const [relative, value] of Object.entries(overlayFiles).sort(([left], [right]) => compareOrdinal(left, right))) {
-    const output = normalizedOutputRelative(relative, 'overlay');
-    if (!output || !output.startsWith('overlay/')) {
-      problems.push(diagnostic(IR_PROJECTION_WRITER_CODES.OVERLAY_INVALID, `Overlay path is invalid: ${relative}`, relative));
+  for (const [relative, graph] of Object.entries(input.graphs || {}).sort(([left], [right]) => compareOrdinal(left, right))) {
+    const output = `graph/${relative.replace(/\\/gu, '/')}`;
+    if (!output.endsWith('.json') || !isRecord(graph)) {
+      problems.push(diagnostic(IR_PROJECTION_WRITER_CODES.PATH_INVALID, `Graph projection must be a JSON object with a .json path: ${relative}`, relative));
+      continue;
+    }
+    addPlanned(planned, problems, output, jsonBytes(graph), `graph:${relative}`);
+  }
+
+  const targetFiles = { ...(input.localization || {}), ...(input.target || {}) };
+  for (const [relative, value] of Object.entries(targetFiles).sort(([left], [right]) => compareOrdinal(left, right))) {
+    const output = normalizedOutputRelative(relative, 'target');
+    if (!output || !output.startsWith('target/ygomaster/Data/')) {
+      problems.push(diagnostic(IR_PROJECTION_WRITER_CODES.TARGET_INVALID, `Target path is invalid: ${relative}`, relative));
       continue;
     }
     try {
-      addPlanned(planned, problems, output, fileBytes(value, relative), `overlay:${relative}`);
+      addPlanned(planned, problems, output, fileBytes(value, relative), `target:${relative}`);
     } catch (error) {
-      problems.push(diagnostic(IR_PROJECTION_WRITER_CODES.OVERLAY_INVALID, errorMessage(error), relative));
+      problems.push(diagnostic(IR_PROJECTION_WRITER_CODES.TARGET_INVALID, errorMessage(error), relative));
     }
   }
 

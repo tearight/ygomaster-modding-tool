@@ -20,6 +20,7 @@ export const IR_SNAPSHOT_CODES = Object.freeze({
   READ_FAILED: 'IR_SNAPSHOT_READ_FAILED',
   MANIFEST_MISSING: 'IR_SNAPSHOT_MANIFEST_MISSING',
   MANIFEST_INVALID: 'IR_SNAPSHOT_MANIFEST_INVALID',
+  PATH_COLLISION: 'IR_SNAPSHOT_PATH_COLLISION',
 } as const);
 
 export type IrSnapshotCode = (typeof IR_SNAPSHOT_CODES)[keyof typeof IR_SNAPSHOT_CODES];
@@ -179,6 +180,9 @@ const readEntries = async (
   }
   directoryEntries.sort((left, right) => compareOrdinal(left.name, right.name));
   for (const directoryEntry of directoryEntries) {
+    // Recoverable authored-document deletes live here, but recovery bytes are
+    // not executable content and must not affect generation or compilation.
+    if (current === root && directoryEntry.name === '.trash') continue;
     const child = path.join(current, directoryEntry.name);
     const relative = path.relative(root, child).split(path.sep).join('/');
     if (hasForbiddenSegment(relative, forbidden)) {
@@ -235,6 +239,18 @@ export const discoverIrSnapshot = async (
   const entries: SnapshotEntry[] = [];
   const problems: Problem[] = [];
   await readEntries(root, root, forbiddenNames(options), entries, problems);
+  const portablePaths = new Map<string, string>();
+  for (const entry of entries) {
+    const segments = entry.path.split('/');
+    for (let index = 1; index <= segments.length; index += 1) {
+      const prefix = segments.slice(0, index).join('/');
+      const portable = prefix.normalize('NFKC').toLocaleLowerCase('en-US');
+      const existing = portablePaths.get(portable);
+      if (existing && existing !== prefix) {
+        problems.push(problem(IR_SNAPSHOT_CODES.PATH_COLLISION, `Portable content path collision: ${existing} and ${prefix}`, prefix));
+      } else portablePaths.set(portable, prefix);
+    }
+  }
   const manifestEntry = entries.find((entry) => entry.path === CONTENT_MANIFEST_FILE);
   if (!manifestEntry) problems.push(problem(IR_SNAPSHOT_CODES.MANIFEST_MISSING, `Required content manifest is missing: ${CONTENT_MANIFEST_FILE}`, CONTENT_MANIFEST_FILE));
   const manifestResult = manifestEntry ? parseManifest(manifestEntry) : { problems: [] as Problem[] };

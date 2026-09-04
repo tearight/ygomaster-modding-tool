@@ -5,7 +5,9 @@ import {
   CardNameResolver,
   CardResolutionLock,
   normalizeCardName,
+  parseCardReferenceText,
 } from './card-resolver';
+import type { CardReferenceSelector } from './card-resolver';
 import {
   contentDiagnostic,
   parseSectionedLines,
@@ -47,6 +49,7 @@ export const DECK_CODES = Object.freeze({
   SIDE_SIZE_INVALID: 'DECK_SIDE_SIZE_INVALID',
   SIDE_SIZE: 'DECK_SIDE_SIZE_INVALID',
   EXTRA_LEGALITY_UNAVAILABLE: 'DECK_EXTRA_LEGALITY_UNAVAILABLE',
+  MAIN_CARD_INVALID: 'DECK_MAIN_CARD_INVALID',
   EXTRA_CARD_INVALID: 'DECK_EXTRA_CARD_INVALID',
   COPY_LIMIT: 'DECK_COPY_LIMIT',
   REGULATION_VIOLATION: 'DECK_REGULATION_VIOLATION',
@@ -87,6 +90,7 @@ export interface DeckLineEntry {
   section: DeckSection;
   count: number;
   sourceName: string;
+  selector?: CardReferenceSelector;
   /** Name after line whitespace normalization, before card catalog resolution. */
   value: string;
   raw: string;
@@ -194,7 +198,7 @@ export interface DeckIRPart {
   r: number[];
 }
 
-/** The short m/e/s form is the shape consumed by the current overlay core. */
+/** The short m/e/s form is the shape consumed by the Data materializer. */
 export interface DeckIR {
   m: DeckIRPart;
   e: DeckIRPart;
@@ -274,7 +278,7 @@ const emptyResolvedSections = (): DeckSectionMap<ResolvedDeckCard[]> => ({ main:
 const optionsWithPath = (sourcePathOrOptions?: string | DeckParseOptions): DeckParseOptions =>
   typeof sourcePathOrOptions === 'string' ? { sourcePath: sourcePathOrOptions } : (sourcePathOrOptions || {});
 
-const parseCountAndName = (value: string): { count?: number; name?: string; code?: string; message?: string } => {
+const parseCountAndName = (value: string): { count?: number; name?: string; selector?: CardReferenceSelector; code?: string; message?: string } => {
   const match = /^(\S+)(?:\s+)(.*)$/u.exec(value.trim());
   if (!match) {
     return {
@@ -290,12 +294,13 @@ const parseCountAndName = (value: string): { count?: number; name?: string; code
   if (!Number.isSafeInteger(count) || count < 1) {
     return { code: DECK_CODES.COUNT_INVALID, message: `Deck count must be between 1 and ${Number.MAX_SAFE_INTEGER}` };
   }
-  const name = (rawName || '').trim();
+  const reference = parseCardReferenceText((rawName || '').trim());
+  const name = reference.name;
   if (!name) return { code: DECK_CODES.NAME_INVALID, message: 'Deck card name is missing' };
   if (/^\d+$/u.test(name)) {
     return { code: DECK_CODES.RUNTIME_ID_FORBIDDEN, message: 'Authored decklists use English card names, not runtime IDs or passcodes' };
   }
-  return { count, name };
+  return { count, name, ...(reference.selector ? { selector: reference.selector } : {}) };
 };
 
 const metadataCopy = (metadata: DeckMetadata | undefined, sourcePath?: string): { metadata: DeckMetadata; problems: Problem[] } => {
@@ -376,6 +381,7 @@ export const parseDecklist = (
       section,
       count: parsed.count,
       sourceName: parsed.name,
+      ...(parsed.selector ? { selector: parsed.selector } : {}),
       value: entry.value,
       raw: entry.raw,
       span: entry.span,
@@ -627,6 +633,15 @@ const validateResolvedDeck = (
         }));
       });
     }
+    if (entry.section === 'main' && hasExtraDeckPolicy(options) && extraDeckCardAllowed(entry.runtimeId, options)) {
+      entry.spans.forEach((span, index) => {
+        problems.push(contentDiagnostic({
+          code: DECK_CODES.MAIN_CARD_INVALID,
+          message: `Extra Deck card cannot be placed in Main under the selected campaign policy: ${entry.sourceNames[index] || entry.sourceName}`,
+          span,
+        }));
+      });
+    }
     const hook = options.regulationHook || options.regulation;
     if (hook) {
       const result = hook({ ...entry, totalCopies });
@@ -667,6 +682,7 @@ const resolveDocument = (
     sourcePath: document.sourcePath,
     sourceSpan: entry.span,
     jsonPointer: `/sections/${entry.section}/lines/${entry.line}`,
+    ...(entry.selector ? { selector: entry.selector } : {}),
   }));
   const batch = resolver.resolveBatch(requests);
   problems.push(...batch.problems);
@@ -730,7 +746,7 @@ const readIrPart = (value: unknown, section: DeckSection): DeckIRPart => {
   return { ids: [...value.ids] as number[], r: [...value.r] as number[] };
 };
 
-/** Validate and clone the m/e/s projection that the current overlay core consumes. */
+/** Validate and clone the m/e/s projection that the Data materializer consumes. */
 export const reloadDeckIr = (value: unknown): DeckIR => {
   if (!isRecord(value)) throw invalidIr('Deck IR must be an object');
   return {

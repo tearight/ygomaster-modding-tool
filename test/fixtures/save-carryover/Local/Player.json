@@ -1,0 +1,12 @@
+{
+  // Only Gems and CraftPoints are named by public documentation.
+  "Gems": 1000,
+  "CraftPoints": {
+    "1": 10
+  },
+  "syntheticUnknown": {
+    "numericString": "001",
+    "nullable": null,
+    "keep": [1, "1", false]
+  }
+}

@@ -6,11 +6,13 @@ import { GateCreate } from './components/gate/GateCreate';
 import { GateDetail } from './components/gate/GateDetail';
 import { GateList } from './components/gate/GateList';
 import { ContentPipeline } from './components/content/ContentPipeline';
+import { ShopAuthoring } from './components/shop/ShopAuthoring';
 import { Layout } from './components/layout/Layout';
 import { SettingsDetail } from './components/settings/SettingsDetail';
-import { StructureDeckCreate } from './components/structure-deck/StructureDeckCreate';
-import { StructureDeckDetail } from './components/structure-deck/StructureDeckDetail';
-import { StructureDeckList } from './components/structure-deck/StructureDeckList';
+import { StructureAuthoring } from './components/structure-deck/StructureAuthoring';
+import { RegulationAuthoring } from './components/regulation/RegulationAuthoring';
+import { LocalizationAssetAuthoring } from './components/localization/LocalizationAssetAuthoring';
+import { CatalogAdministration } from './components/catalog/CatalogAdministration';
 import { Utilities } from './components/utilities/Utilities';
 
 export const router = createHashRouter([
@@ -36,20 +38,32 @@ export const router = createHashRouter([
         element: <GateDetail />,
       },
       {
+        path: 'gates/:id/chapters/:chapterId',
+        element: <GateDetail />,
+      },
+      {
         path: 'decks',
         element: <DeckList />,
       },
       {
+        path: 'shop',
+        element: <ShopAuthoring />,
+      },
+      {
         path: 'structure-decks',
-        element: <StructureDeckList />,
+        element: <StructureAuthoring />,
       },
       {
-        path: 'structure-decks/create',
-        element: <StructureDeckCreate />,
+        path: 'regulations',
+        element: <RegulationAuthoring />,
       },
       {
-        path: 'structure-decks/:id',
-        element: <StructureDeckDetail />,
+        path: 'localization-assets',
+        element: <LocalizationAssetAuthoring />,
+      },
+      {
+        path: 'catalog',
+        element: <CatalogAdministration />,
       },
       {
         path: 'utilities',

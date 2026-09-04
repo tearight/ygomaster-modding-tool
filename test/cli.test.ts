@@ -14,6 +14,7 @@ const requiredCommands = [
   'structure list', 'structure read', 'structure write', 'structure delete',
   'trash list', 'trash restore',
   'campaign validate', 'campaign deploy',
+  'diagnostic deploy-projection',
   'content inspect', 'content resolve', 'content validate', 'content compile', 'content diff',
   'migration preview', 'migration apply',
   'runtime status', 'runtime fetch',
